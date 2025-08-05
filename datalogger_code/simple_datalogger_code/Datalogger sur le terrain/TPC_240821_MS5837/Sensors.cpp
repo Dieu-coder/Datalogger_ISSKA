@@ -146,7 +146,8 @@ void Sensors::measure() {
   Wire.begin();
   Wire.setClock(50000);
   delay(100);
-  //values[7] = (values[5]-values[4])*10/9.81;//water height in cm is (water_pressur-air_pressure)*10/g
+  values[7] = (values[5]-values[4])*10/9.81;//water height in cm is (water_pressur-air_pressure)*10/g
+
 
   //put here the measurement of other sensors!!!
 }

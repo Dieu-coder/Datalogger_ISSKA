@@ -134,7 +134,7 @@ void Sensors::measure() {
   Serial.print("ADC count value: ");Serial.println(adcValue);
   voltage = adcValue/ADC_MAX*V_REF;
   //float O2_voltage_tcomp=0.002864*values[3]+1.124689;
-  float O2_voltage_tcomp=0.002864*values[3]+1.02689;
+  float O2_voltage_tcomp=0.002864*values[3]+1.02889;
   Serial.print("Voltage: ");Serial.println(voltage,4);
   //O2 sensor is the SGX-40X
   //0% -> 0V    18.4% -> 1.2V
