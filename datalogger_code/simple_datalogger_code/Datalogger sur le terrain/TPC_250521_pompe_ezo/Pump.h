@@ -45,6 +45,7 @@ class Pump {
     int pumpActivationCount;
     void sendCommand(const String& pumpcommand); // Lance un cycle de la pompe
     void save_in_SD(int &bootCount);
+    int countLines(File &file);
   };
 
   extern Pump pump;

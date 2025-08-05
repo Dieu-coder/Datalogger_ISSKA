@@ -100,10 +100,10 @@ void setup(){
     rtc.begin();
     rtc.disable32K(); //The 32kHz output is enabled by default. We don't need it so we disable it
     if (SetRTC) adjust_rtc_time_with_time_from_SD();
-    pump.configure(time_step);
+    
  
     put_usefull_values_on_display(); // show RTC time, battery voltage, time step and sensors values on the display
-
+    pump.configure(time_step);
     get_next_rounded_time(); //this finds the next rounded time and puts it as starting time
     first_time = false; //to make the initialization only once
     deep_sleep_mode(0); //deep sleep until starting time 
