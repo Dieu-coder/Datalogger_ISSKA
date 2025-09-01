@@ -33,7 +33,7 @@ static SHT31    sht;
 static BMP581   bmp;
 
 // ===== Names & values (same order everywhere) =====
-static const char* NAMES[] = { "Vbatt", "tempSHT", "humSHT", "tempBMP", "pressBMP" };
+static const char* const NAMES[] = { "Vbatt", "tempSHT", "humSHT", "tempBMP", "pressBMP" };
 static const int   NB_VALUES = sizeof(NAMES) / sizeof(NAMES[0]);
 static float       VALUES[NB_VALUES];         // valeurs courantes
 static uint8_t     HEALTH_MASK = 0;           // bit0=SHT ok, bit1=BMP ok, etc.
@@ -53,13 +53,13 @@ static inline float asNaN() { return NAN; }
 
 // ===== Public API =====
 
-const char* const* Sensors::get_names() const { return NAMES; }
-int Sensors::get_nb_values() const { return NB_VALUES; }
+const char* const* Sensors::get_names() { return NAMES; }
+int Sensors::get_nb_values() { return NB_VALUES; }
 const float* Sensors::get_values() const { return VALUES; }
 uint8_t Sensors::getHealthMask() const { return HEALTH_MASK; }
 
 // "Vbatt;tempSHT;...;"
-void Sensors::printFileHeader(Print& out) const {
+void Sensors::printFileHeader(Print& out) {
   for (int i = 0; i < NB_VALUES; ++i) {
     out.print(NAMES[i]);
     out.print(';');
@@ -67,7 +67,7 @@ void Sensors::printFileHeader(Print& out) const {
 }
 
 // "v1;v2;...;"
-void Sensors::printFileData(Print& out) const {
+void Sensors::printFileData(Print& out) {
   char buf[24];
   for (int i = 0; i < NB_VALUES; ++i) {
     if (isnan(VALUES[i])) {
@@ -83,7 +83,7 @@ void Sensors::printFileData(Print& out) const {
 // Serial:
 // Vbatt: 4.2
 // tempSHT: 23.1
-void Sensors::printSerial(Print& out) const {
+void Sensors::printSerial(Print& out) {
   char buf[24];
   for (int i = 0; i < NB_VALUES; ++i) {
     out.print(NAMES[i]);

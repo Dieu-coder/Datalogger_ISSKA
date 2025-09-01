@@ -9,13 +9,13 @@ public:
   Sensors() {}
 
   // --- Noms & comptage ---
-  const char* const* get_names() const;  // pointeur sur tableau de C-strings
-  int                get_nb_values() const;
+  const char* const* get_names();  // pointeur sur tableau de C-strings
+  int get_nb_values();
 
   // --- Sorties sans heap ---
-  void printFileHeader(Print& out) const; // "name;name;..."
-  void printFileData(Print& out)   const; // "v1;v2;..."
-  void printSerial(Print& out)     const; // "name: value\n..."
+  void printFileHeader(Print& out); // "name;name;..."
+  void printFileData(Print& out); // "v1;v2;..."
+  void printSerial(Print& out); // "name: value\n..."
 
   // Pour ton OLED: met dans 'buf' le même contenu que printSerial()
   void formatSerialToBuffer(char* buf, size_t bufsize) const;
