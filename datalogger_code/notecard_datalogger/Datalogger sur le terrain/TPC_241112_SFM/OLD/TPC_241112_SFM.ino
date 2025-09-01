@@ -50,7 +50,7 @@ RTC_DATA_ATTR int start_date_time[6]; //[year,month,day,hour,minute,second] of t
 RTC_DATA_ATTR int time_step;
 RTC_DATA_ATTR int nb_meas_sent_at_once; //number of measurements sent at once with the notecard
 RTC_DATA_ATTR bool SetRTC; //read this value from the conf.txt file on the SD card. True means set the clock time with GSM signal
-RTC_DATA_ATTR int failed_sync_count = 0;
+
 
 //********************** MAIN LOOP OF THE PROGRAMM *******************************
 //The setup is recalled each time the micrcontroller wakes up from a deepsleep
@@ -385,7 +385,7 @@ bool synchronize_notecard(){ //returns true if it was able to connect the noteca
     J *SyncStatus = notecard.requestAndResponse(notecard.newRequest("hub.sync.status"));
     completed = (int)JGetNumber(SyncStatus,"completed");
     notecard.deleteResponse(SyncStatus); //delete the response
-    if((micros()-start_time_connection)/1000000>120){ //after 240s stop waiting for the connexion
+    if((micros()-start_time_connection)/1000000>240){ //after 240s stop waiting for the connexion
       GSM_time_out = true;
       return false;
     }
@@ -525,118 +525,100 @@ unsigned int getGSMtime(){
 }
 
 void send_data_overGSM() {
-    int total_meas_to_send = nb_meas_sent_at_once + (failed_sync_count * nb_meas_sent_at_once);
-    Serial.printf("📤 Envoi de %d mesures...\n", total_meas_to_send);
-
+    // Lecture du fichier CSV depuis la mémoire SD
     File myFile = SD.open(DATA_FILENAME, FILE_READ);
     if (!myFile) {
-        Serial.println("❌ Erreur : Impossible d'ouvrir le fichier SD.");
+        Serial.println("Erreur : Impossible d'ouvrir le fichier SD.");
         return;
     }
 
-    // ⬅️ Lecture à l'envers façon code de base
     int position_in_csv = myFile.size();
-    for (int i = 0; i < total_meas_to_send; i++) {
-        position_in_csv = max(position_in_csv - 20, 0);
+
+    // Identifier la position des dernières lignes dans le fichier CSV
+    for (int i = 0; i < nb_meas_sent_at_once; i++) {
+        position_in_csv -= 20;
         myFile.seek(position_in_csv);
-        while (position_in_csv > 0 && myFile.peek() != '\n') {
+        while (myFile.peek() != '\n') {
             position_in_csv--;
-            myFile.seek(position_in_csv);
+            myFile.seek(position_in_csv); // Recule jusqu'au séparateur de ligne
         }
     }
     myFile.seek(position_in_csv + 1);
 
-    // Lecture des lignes après repositionnement
-    String data_matrix[total_meas_to_send][sensor.get_nb_values()];
-    int time_array[total_meas_to_send], counter = 0;
+    // Initialisation du compteur de mesures envoyées
+    int measures_sent = 0;
 
-    while (myFile.available() && counter < total_meas_to_send) {
+    // Boucle pour lire et envoyer chaque mesure
+    while (myFile.available() && measures_sent < nb_meas_sent_at_once) {
+        // Lecture d'une mesure
+        String data_matrix[sensor.get_nb_values()];
+        int time_value;
+
         for (int i = 0; i < 2 + sensor.get_nb_values(); i++) {
             String element = myFile.readStringUntil(';');
-            if (element.length() > 0) {
-                if (i == 1) {
-                    // Vérifie que c’est bien une date
-                    if (element.indexOf('/') == -1 || element.indexOf(':') == -1) {
-                        myFile.readStringUntil('\n'); // skip the line
-                        continue;
-                    }
-                    DateTime datetime(
-                        element.substring(6, 10).toInt(), element.substring(3, 5).toInt(), element.substring(0, 2).toInt(),
-                        element.substring(11, 13).toInt(), element.substring(14, 16).toInt(), element.substring(17, 19).toInt());
-                    time_array[counter] = datetime.unixtime() - 3600;
-                } else if (i > 1) {
-                    data_matrix[counter][i - 2] = element;
-                }
+            if (element.length() > 0 && i == 1) { // Conversion de l'heure en unixtime
+                String day = element.substring(0, 2);
+                String month = element.substring(3, 5);
+                String year = element.substring(6, 10);
+                String hour = element.substring(11, 13);
+                String minute = element.substring(14, 16);
+                String second = element.substring(17, 19);
+                DateTime datetime = DateTime(year.toInt(), month.toInt(), day.toInt(), hour.toInt(), minute.toInt(), second.toInt());
+                time_value = datetime.unixtime() - 3600; // UTC+1 -> UTC+0
+            }
+            if (element.length() > 0 && i > 1) {
+                data_matrix[i - 2] = element; // Stocke les données des capteurs
             }
         }
-        myFile.readStringUntil('\n');
-        counter++;
-    }
-    myFile.close();
+        myFile.readStringUntil('\n'); // Ignorer la fin de ligne
 
-    // Affichage des données envoyées
-    Serial.println("Données envoyées :");
-    for (int i = 0; i < total_meas_to_send; i++) {
-        Serial.printf("🕒 %d: ", time_array[i]);
-        for (int j = 0; j < sensor.get_nb_values(); j++) {
-            Serial.printf("%s  ", data_matrix[i][j].c_str());
+        // Initialisation de la Notecard pour chaque mesure
+        initialize_notecard(); // Allume et configure la Notecard via le MOSFET
+
+        // Préparer la requête note.add
+        J *req_data = notecard.newRequest("note.add");
+        if (req_data != NULL) {
+            JAddStringToObject(req_data, "file", "dataSFM_2.qo");
+            J *body = JAddObjectToObject(req_data, "body");
+            if (body != NULL) {
+                J *data = JCreateObject();
+                JAddItemToObject(body, "data", data);
+                String *sensor_names = sensor.get_names();
+                for (int i = 0; i < sensor.get_nb_values(); i++) {
+                    J *sensorArray = JAddArrayToObject(data, sensor_names[i].c_str());
+                    J *sample = JCreateObject();
+                    JAddItemToArray(sensorArray, sample);
+                    JAddStringToObject(sample, "value", data_matrix[i].c_str());
+                    JAddStringToObject(sample, "epoch", String(time_value).c_str());
+                }
+            }
+            notecard.sendRequest(req_data); // Envoi de la requête
         }
-        Serial.println();
-    }
 
-    initialize_notecard();
-    tp.DotStar_SetPixelColor(25, 25, 0);
+        // Éteindre la Notecard après chaque envoi
+        //digitalWrite(MOSFET_NOTECARD_PIN, LOW); // Économise de l'énergie
+        measures_sent++; // Incrémenter le compteur
 
-    // Construction JSON
-    J *body = JCreateObject();
-    J *data = JCreateObject();
-    JAddItemToObject(body, "data", data);
-    String* sensor_names = sensor.get_names();
-
-    for (int i = 0; i < sensor.get_nb_values(); i++) {
-        J *sensorArray = JAddArrayToObject(data, sensor_names[i].c_str());
-        for (int j = 0; j < total_meas_to_send; j++) {
-            J *sample = JCreateObject();
-            JAddItemToArray(sensorArray, sample);
-            JAddStringToObject(sample, "value", data_matrix[j][i].c_str());
-            JAddStringToObject(sample, "epoch", String(time_array[j]).c_str());
+        // Synchronisation lorsque le nombre de mesures atteint le seuil
+        if (measures_sent >= nb_meas_sent_at_once) {
+            if (synchronize_notecard()) {
+                Serial.println("Données envoyées et synchronisées avec succès !");
+                tp.DotStar_SetPixelColor(0, 50, 0); // LED verte
+                get_external_parameter();
+            } else {
+                Serial.println("Échec de la synchronisation.");
+                tp.DotStar_SetPixelColor(50, 0, 0); // LED rouge
+                get_external_parameter();
+            }
+            break; // Sortir de la boucle dès que la synchronisation est faite
         }
     }
 
-    J *req_data = notecard.newRequest("note.add");
-    JAddStringToObject(req_data, "file", "data.qo");
-    JAddItemToObject(req_data, "body", body);
-    JAddBoolToObject(req_data, "sync", false);
-    notecard.sendRequest(req_data);
+    myFile.close(); // Fermer le fichier SD après la lecture
 
-    Serial.println("🔄 Synchronisation avec Notehub...");
-    if (synchronize_notecard()) {
-        J *check_file_req = notecard.newRequest("note.get");
-        JAddStringToObject(check_file_req, "file", "data.qo");
-        J *check_file_rsp = notecard.requestAndResponse(check_file_req);
-
-        bool file_still_pending = !(check_file_rsp == NULL || JGetObject(check_file_rsp, "body") == NULL);
-
-        if (!file_still_pending) {
-            Serial.println("✅ Synchronisation réussie et données envoyées !");
-            tp.DotStar_SetPixelColor(0, 50, 0);
-            get_external_parameter();
-            failed_sync_count = 0;
-        } else {
-            Serial.println("⚠️ Connexion OK, mais données non transférées !");
-            tp.DotStar_SetPixelColor(50, 25, 0);
-            failed_sync_count++;
-        }
-    } else {
-        Serial.println("❌ Échec de la synchronisation (pas de connexion).");
-        tp.DotStar_SetPixelColor(50, 0, 0);
-        failed_sync_count++;
-    }
-
-    digitalWrite(MOSFET_NOTECARD_PIN, LOW);
+    // Passage en mode sommeil profond
     sensor.tcaselect(0);
-    delay(100);
+    deep_sleep_mode(time_step);
 }
-
-
+ 
 
