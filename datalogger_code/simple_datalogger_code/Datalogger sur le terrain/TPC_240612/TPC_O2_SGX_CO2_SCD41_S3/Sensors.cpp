@@ -115,7 +115,7 @@ void Sensors::measure() {
   delay(100);
   co2_sensor.begin(false, false, false);
   co2_sensor.measureSingleShot();
-  delay(10000); //this sensor needs at least 4-10 seconds to measure something good (heating time)
+  delay(12000); //this sensor needs at least 4-10 seconds to measure something good (heating time)
   co2_sensor.readMeasurement();
   values[7]=co2_sensor.getCO2();
   values[8]=co2_sensor.getTemperature();
