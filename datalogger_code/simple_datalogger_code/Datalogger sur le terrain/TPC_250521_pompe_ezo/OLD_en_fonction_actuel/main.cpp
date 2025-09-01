@@ -101,13 +101,9 @@ void setup(){
     rtc.disable32K(); //The 32kHz output is enabled by default. We don't need it so we disable it
     if (SetRTC) adjust_rtc_time_with_time_from_SD();
     
-    pump.configure(time_step, u8x8);
-    pump.displayConfiguration(u8x8);
-        
+ 
     put_usefull_values_on_display(); // show RTC time, battery voltage, time step and sensors values on the display
-
-
-    
+    pump.configure(time_step);
     get_next_rounded_time(); //this finds the next rounded time and puts it as starting time
     first_time = false; //to make the initialization only once
     deep_sleep_mode(0); //deep sleep until starting time 
@@ -309,11 +305,8 @@ void initialise_SD_card(){ //open SD card. Write header in the data.csv file. re
     dataFile.println();
     dataFile.println();
     dataFile.println();
-  dataFile.print("ID;DateTime;");
-  // Append sensor header and pump header fragment for merged CSV
-  dataFile.print(header);
-  dataFile.print(pump.getCSVHeader());
-  dataFile.println();
+    dataFile.print("ID;DateTime;");
+    dataFile.println(header);
     dataFile.close();
     // show on display and LED if values on SD card are OK
     u8x8.setCursor(0, 2);
@@ -356,9 +349,6 @@ void save_data_in_SD(){
   data_message = data_message + ";"+ buffer + ";";
   String sensor_data = sensor.getFileData(); 
   data_message = data_message + sensor_data;
-  // Append pump fields to the same CSV line. This keeps pump modular: if pump is removed,
-  // remove this single call and the pump include/declaration in main.
-  data_message = data_message + pump.getCSVFields();
   Serial.println(data_message);
 
   //initialise SD card

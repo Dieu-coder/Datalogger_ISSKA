@@ -1,0 +1,6 @@
+0 ;  // Mode configuration injections (0 = normal, 1 = config / écriture)
+0;  // Calibration offset hauteur (0 = ne pas calibrer, 1 = calibrer maintenant)
+0;  // Amorçage / remplissage tubes (0 = non, 1 = remplir une fois)
+0-10,5,2; // <limite inférieure de la classe> - <limite supérieure de la classe>, <dose à injecter>, <nombre d'injections autorisées>;
+10-20,7,3;
+20-40,9,4;

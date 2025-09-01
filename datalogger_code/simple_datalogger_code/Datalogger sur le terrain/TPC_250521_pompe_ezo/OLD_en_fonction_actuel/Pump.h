@@ -25,31 +25,29 @@ extern const int nb_values;    // Declare the size
 extern float values[];
 extern int doseTableSize;
 extern ClassDose doseTable[10];
+
 class Pump {
   public:
     // Constructeur
     Pump();
-    void configure(int &time_step, U8X8 &u8x8);
+    void configure(int &time_step);
 
     void handleInjections2(int &bootCount, int &time_step);
     void displayConfiguration(U8X8 &u8x8);
     void setMeasuredWaterHeight(float height);
-  // Return a header fragment for pump fields to append to the main CSV header
-  String getCSVHeader();
-  // Returns pump-related CSV fields to be appended to the main data line.
-  String getCSVFields();
 
   private:                 // Lit la réponse du port série
     void pumpSleep();                             // Met la pompe en veille
     bool handleError(String& response);    
-  String latestErrorMessage = "*OFF";
-  static InjectionData data;
-  String readPumpResponse(); 
+    String latestErrorMessage = "*OFF";
+    static InjectionData data;
+    String readPumpResponse(); 
+    int pumpActivationCount;
     void sendCommand(const String& pumpcommand); // Lance un cycle de la pompe
-  // pump previously wrote its own CSV; that behaviour was removed in favor of merged /data.csv
+    void save_in_SD(int &bootCount);
     int countLines(File &file);
-  // Display instructions were removed and replaced by README_PUMP.md on the SD card.
   };
 
   extern Pump pump;
+
 #endif // PUMP_H

@@ -79,10 +79,6 @@ String Sensors::serialPrint() { //Display sensor mesures to Serial for debug pur
   for(int i = 0; i< nb_values; i++){
     sensor_display_str = sensor_display_str + names[i]+": "+String(values[i],1) + "\n";
   }
-  // Remove the last \n character
-  if (sensor_display_str.length() > 0) {
-    sensor_display_str = sensor_display_str.substring(0, sensor_display_str.length() - 1);
-  }
   Serial.print(sensor_display_str);
   return sensor_display_str;
 }

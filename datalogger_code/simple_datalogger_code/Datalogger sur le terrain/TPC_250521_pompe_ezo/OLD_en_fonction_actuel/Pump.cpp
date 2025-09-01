@@ -1,17 +1,19 @@
 #include "pump.h"
 #include <TinyPICO.h>
 #include <EEPROM.h>
-#include "Sensors.h"
 // File paths for config and data logging
 #define PUMP_CONFIGFILE "/pump.txt"
+#define PUMP_DATAFILE "/pumpdata.csv"
 #define TEST_FILENAME "/test.csv"
 
 // Constructor
 Pump::Pump() {
   // Empty constructor
 }
-extern TinyPICO tp;
-extern Sensors sensor;
+
+
+
+
 // Persistent variables in RTC memory (survive deep sleep)
 RTC_DATA_ATTR InjectionData Pump::data = {
   .heights = {0.0f},     // Initialize all water height readings to 0
@@ -23,13 +25,13 @@ RTC_DATA_ATTR ClassDose doseTable[10];           // Table of dose configurations
 RTC_DATA_ATTR int pumpActivationCount = 0;       // Number of times pump was activated
 RTC_DATA_ATTR bool Inject = true;                // Whether injection is allowed
 RTC_DATA_ATTR int counter = 0;                   // Counter for delay between injections
-RTC_DATA_ATTR float water_height_offset = 10;   // offset to correct the water height in function of how deep is the sensor         
+RTC_DATA_ATTR float water_height_offset = 10;   // offset to correct the water height in function of how deep is the sensor              
 float measuredWaterheight =  0;                  // Current measured water level
 bool Setoffset = false;
 bool Config = false;
 bool Filltubes = false;
 const int EEPROM_SIZE = 4;  // Enough for a float (4 bytes)
-const int EEPROM_INJECTION_START = 4; // Start address for injection data in EEPROM. 
+const int EEPROM_INJECTION_START = 4;
 
 // Function to read a response from the pump with a timeout
 String Pump::readPumpResponse() {
@@ -150,18 +152,18 @@ void Pump::sendCommand(const String& pumpcommand) {
 
 // Display current pump configuration on screen and Serial
 void Pump::displayConfiguration(U8X8 &u8x8) {
+  Serial.printf("%-18s| %-18s| %-5s\n", "Lower class limit", "Upper class limit", "Dose");
+  Serial.println("------------------|------------------|------");
+
+  for (int i = 0; i < doseTableSize; i++) {
+    Serial.printf("%-18d| %-18d| %-5d\n", doseTable[i].lower, doseTable[i].upper, doseTable[i].dose);
+  }
+
   // Display on OLED
   u8x8.clear();
   u8x8.setCursor(0, 0);
   u8x8.println(" L | U | D | I ");
   u8x8.println("---|---|---|--");
-
-  // If no dose configurations, show a message
-  if (doseTableSize == 0) {
-    u8x8.println("No config found!");
-    delay(8000);
-    return;
-  }
 
   for (int i = 0; i < doseTableSize; i++) {
     if (i % 6 == 0 && i > 0) {
@@ -187,27 +189,15 @@ void Pump::displayConfiguration(U8X8 &u8x8) {
 
     if (doseTable[i].numberOfInjections < 10) u8x8.print("  ");
     else if (doseTable[i].numberOfInjections < 100) u8x8.print(" ");
-    u8x8.println(doseTable[i].numberOfInjections);  // Print the number of injections and go to next line
+    u8x8.println(doseTable[i].numberOfInjections);
   }
-  delay(8000);
-  Serial.printf("%-18s| %-18s| %-5s\n", "Lower class limit", "Upper class limit", "Dose");
-  Serial.println("------------------|------------------|------");
-
-  for (int i = 0; i < doseTableSize; i++) {
-    Serial.printf("%-18d| %-18d| %-5d\n", doseTable[i].lower, doseTable[i].upper, doseTable[i].dose);
-  }
+  delay(5000);
 }
-
 // Load configuration from SD card
-void Pump::configure(int &time_step, U8X8 &u8x8) {
-  u8x8.clear();
-  u8x8.setCursor(0, 0);
-  u8x8.println("Pump init...");
+void Pump::configure(int &time_step) {
   if (!SD.begin(SD_CS_PIN)) {
-    u8x8.println("SD failure!");
-    tp.DotStar_SetPixelColor(50, 0, 0); // Set DotStar to red to indicate failure
-  } 
-  else {
+    Serial.println("SD card initialization failed!");
+  } else {
     File pumpconfigFile = SD.open(PUMP_CONFIGFILE);
     int EEPROM_SIZE = sizeof(float) + (countLines(pumpconfigFile) - 1) * sizeof(int);
     EEPROM.begin(EEPROM_SIZE);
@@ -220,15 +210,14 @@ void Pump::configure(int &time_step, U8X8 &u8x8) {
       Serial2.print("L,0\r");
       delay(500);
     }
-    u8x8.println("Success!");
-    delay(500);
-    u8x8.clear();
-    u8x8.setCursor(0, 0);
-    u8x8.println("Pump config...");
+
+    Serial.println("reading config file...");
+    
     String str_Config = pumpconfigFile.readStringUntil(';');
     if (str_Config=="0") Config = false;
     else if (str_Config=="1") Config = true;
-
+    Serial.print("debug");
+    Serial.println(str_Config);
     while (pumpconfigFile.peek() != '\n'){ //if there are any black space if the config file
       pumpconfigFile.seek(pumpconfigFile.position() + 1);
     }
@@ -237,20 +226,22 @@ void Pump::configure(int &time_step, U8X8 &u8x8) {
     String str_Setoffset = pumpconfigFile.readStringUntil(';');
     if (str_Setoffset=="0") Setoffset = false;
     else if (str_Setoffset=="1") Setoffset = true;
+    Serial.print("debug");
+    Serial.println(str_Setoffset);
     while (pumpconfigFile.peek() != '\n'){ //if there are any black space if the config file
       pumpconfigFile.seek(pumpconfigFile.position() + 1);
     }
     pumpconfigFile.seek(pumpconfigFile.position() + 1);
-    
     
     String str_Filltubes = pumpconfigFile.readStringUntil(';');
     if (str_Filltubes=="0") Filltubes = false;
     else if (str_Filltubes=="1") Filltubes = true;
+    Serial.print("debug");
+    Serial.println(str_Filltubes);
     while (pumpconfigFile.peek() != '\n'){ //if there are any black space if the config file
       pumpconfigFile.seek(pumpconfigFile.position() + 1);
     }
     pumpconfigFile.seek(pumpconfigFile.position() + 1);
-
 
     while (pumpconfigFile.available()) {
       String line = pumpconfigFile.readStringUntil('\n');
@@ -281,39 +272,48 @@ void Pump::configure(int &time_step, U8X8 &u8x8) {
           EEPROM.get(addr, numberOfInjections);
 
           doseTable[doseTableSize++] = {lower, upper, dose, numberOfInjections};
-
+          Serial.print("wkjn bdld");
+          Serial.print(numberOfInjections);
         }
    
       }
     }
     pumpconfigFile.close();
 
+    // Initialize data file
+    File pumpdataFile = SD.open(PUMP_DATAFILE, FILE_APPEND);
+    pumpdataFile.print("ID; INJECTION STATUS; PUMP COUNT\n");
+    pumpdataFile.close();
+    Serial.print("SetOffset:");
+    Serial.println(Setoffset);
+    Serial.print("Offset");
+    Serial.println(water_height_offset);
 
-
-  // pumpdata.csv removed; pump now uses the merged /data.csv via Pump::getCSVFields()
-    sensor.measure();  // Measure water height
     if (Setoffset){
-
+      Serial.print("SetOffset:");
+      Serial.println(Setoffset);
       water_height_offset = measuredWaterheight; 
       EEPROM.put(0, water_height_offset);  // Save at address 0
-      EEPROM.commit();  // Save the flag to EEPROM
-  
-    }
-    else if (!Setoffset){ 
+      EEPROM.commit();  // Important! Actually write to flash
+      Serial.print("Offset saved! EEPROM stored value : ");
       EEPROM.get(0, water_height_offset);
+      Serial.println(water_height_offset);
     }
+    else if (!Setoffset){
+      Serial.print("SetOffset:");
+      Serial.println(Setoffset);
+      EEPROM.get(0, water_height_offset);
+      Serial.print("Offset read from EEPROM! value read : ");
+      Serial.println(water_height_offset);
+    }
+
 
 
     // Send a starting command
     if (Filltubes){
-      u8x8.clear();
-      u8x8.setCursor(0, 1);
-      u8x8.println("Filling tubes..");
       sendCommand("D,150");
     }
     
-
-
 
     // Determine how often the device will boot and run (e.g. hourly)
     data.boot_step = (int)((30.0 / (float)time_step) + 0.5);
@@ -321,6 +321,18 @@ void Pump::configure(int &time_step, U8X8 &u8x8) {
   }
 }
 
+// Log pump status in SD card
+void Pump::save_in_SD(int &bootCount) {
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println("SD card initialization failed!");
+  } 
+  else {
+    String pumpdata_message = String(bootCount) + ";" + pump.latestErrorMessage + ";" + String(pumpActivationCount) + ";";
+    File pumpdataFile = SD.open(PUMP_DATAFILE, FILE_APPEND);
+    pumpdataFile.println(pumpdata_message);
+    pumpdataFile.close();
+  }
+}
 
 // Main function to manage dosing logic
 void Pump::handleInjections2(int &bootCount, int &time_step) {
@@ -370,7 +382,7 @@ void Pump::handleInjections2(int &bootCount, int &time_step) {
   }
 
   // Log result
-  // Pump logging no longer writes its own CSV; main will incorporate pump fields into the merged CSV.
+  save_in_SD(bootCount);
 
   // Reset error message for next cycle
   Serial.print(latestErrorMessage);
@@ -390,18 +402,4 @@ int Pump::countLines(File &file) {
   }
   file.seek(0);  // Reset file pointer for re-use
   return lines;
-}
-
-// Display functions removed; instructions moved to README_PUMP.md on the SD card.
-
-// Return pump-related CSV fields to be appended to main CSV line.
-String Pump::getCSVFields() {
-  // Format: pump_latestError;pumpActivationCount
-  String s = latestErrorMessage + ";" + String(pumpActivationCount);
-  return s;
-}
-
-String Pump::getCSVHeader() {
-  // Header fields corresponding to getCSVFields: LatestError;ActivationCount
-  return "PumpError;PumpActivations";
 }
