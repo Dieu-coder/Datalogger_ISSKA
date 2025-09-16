@@ -31,6 +31,70 @@ If you have any questions contact me per email at nicolas.schmid.6035@gmail.com
 #define BMP581_sensor_ADRESS 0x46 //I2C adress of the BMP581 set on the PCB
 #define SHT35_sensor_ADRESS 0x44 //I2C adress of the SHT35 set on the PCB
 
+// ====== PCHIP METAS (0°) : v = a + b*(q-q_i) + c*(q-q_i)^2 + d*(q-q_i)^3 ======
+// Nœuds de débit (SLM) – incluant l'ancre 0.0
+static const float q_breaks[] = {
+    0.000000000, 0.192000000, 0.609000000, 1.540000000, 3.330000000, 5.940000000, 8.810000000, 11.660000000,
+    15.940000000, 20.440000000, 39.280000000, 73.840000000
+};
+
+// Coefficients PCHIP par intervalle [q_i, q_{i+1}] (METAS 0° + ancre 0,0)
+// v(q) = a[i] + b[i]*(q-q_i) + c[i]*(q-q_i)^2 + d[i]*(q-q_i)^3
+static const float pchip_a[] = {
+    0.000000000, 0.154000000, 0.301000000, 0.498000000, 0.799000000, 1.196000000, 1.602000000, 1.993000000,
+    2.497000000, 2.991000000, 5.014000000
+};
+static const float pchip_b[] = {
+    0.943818221, 0.514445975, 0.273130461, 0.189676840, 0.160228520, 0.146676497, 0.139292988, 0.127383367,
+    0.113660776, 0.108810859, 0.096584972
+};
+static const float pchip_c[] = {
+    0.021706158, -0.586255287, -0.108632088, -0.019616159, -0.004142413, -0.002876564, 0.001968282, -0.003541234,
+    -0.001510906, 0.000420757, -0.000210137
+};
+static const float pchip_d[] = {
+    -3.957857809, 0.474673299, 0.045694767, 0.004242224, 0.000394953, 0.000369393, -0.000949167, 0.000301889,
+    0.000144004, -0.000026370, -0.000002737
+};
+
+// Évalue PCHIP pour un débit q_SLM (SLM). Symétrie: v(-q) = -v(q).
+// Comportement hors-plage : on sature au dernier point (pas d'extrapolation).
+static float pchipVelocityFromSlm(float q_SLM) {
+  float sign = 1.0f;
+  if (q_SLM < 0.0f) { sign = -1.0f; q_SLM = -q_SLM; }
+
+  const int N = sizeof(q_breaks) / sizeof(q_breaks[0]); // 12 nœuds => 11 intervalles
+
+  if (q_SLM <= q_breaks[0]) return 0.0f; // garantit v(0)=0
+
+  // Hors plage haute : on renvoie la valeur au dernier nœud (saturation)
+  if (q_SLM >= q_breaks[N - 1]) {
+    const int iLast = N - 2; // intervalle [N-2, N-1]
+    const float dx = q_breaks[N - 1] - q_breaks[N - 2];
+    const float v_end = pchip_a[iLast]
+                      + pchip_b[iLast] * dx
+                      + pchip_c[iLast] * dx * dx
+                      + pchip_d[iLast] * dx * dx * dx;
+    return sign * v_end;
+  }
+
+  // Recherche binaire de l'intervalle i tel que q_breaks[i] <= q < q_breaks[i+1]
+  int lo = 0, hi = N - 1;
+  while ((hi - lo) > 1) {
+    int mid = (lo + hi) >> 1;
+    if (q_SLM < q_breaks[mid]) hi = mid; else lo = mid;
+  }
+  const int i = lo;
+  const float dx = q_SLM - q_breaks[i];
+  const float v = pchip_a[i]
+                + pchip_b[i] * dx
+                + pchip_c[i] * dx * dx
+                + pchip_d[i] * dx * dx * dx;
+  return sign * v;
+}
+// ====== fin PCHIP ======
+
+
 //create an instance of the sensors' classes
 TinyPICO tiny = TinyPICO();
 SHT31 sht;
@@ -156,12 +220,7 @@ void Sensors::measure() {
   delay(200);
   values[7]=(float(flowRaw)+12288)/120;
   //SFMmoyenne +=flowcorr;
-  if (values[7]>=0){
-    values[8]=(0.0034*pow(values[7],3)-0.0559*pow(values[7],2)+0.4035*values[7]);
-  }
-  else{
-    values[8]=-1*(0.0034*pow(abs(values[7]),3)-0.0559*pow(values[7],2)+0.4035*abs(values[7]));
-  }
+  values[8] = pchipVelocityFromSlm(values[7]);
   values[9] = float(temperatureRaw)/200;
   
   delay(50);
@@ -171,7 +230,7 @@ void Sensors::measure() {
 }
 
 // multiplex bus selection for the first multiplexer 
-void Sensors::tcaselect(uint8_t i) {
+void  Sensors::tcaselect(uint8_t i) {
   if (i > 7) return;
   Wire.beginTransmission(I2C_MUX_ADDRESS);
   Wire.write(1 << i);
