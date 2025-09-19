@@ -236,10 +236,3 @@ void  Sensors::tcaselect(uint8_t i) {
   Wire.write(1 << i);
   Wire.endTransmission();
 }
-
-
-
-
-
-
-
