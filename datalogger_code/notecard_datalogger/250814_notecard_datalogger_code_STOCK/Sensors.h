@@ -27,12 +27,12 @@ public:
   // --- Décimales par capteur (CSV/Serial) ---
   void setCsvDecimals(uint8_t idx, uint8_t decimals);
   void setSerialDecimals(uint8_t idx, uint8_t decimals);
-  void setCsvDecimalsAll(const uint8_t* decimals, int len);
-  void setSerialDecimalsAll(const uint8_t* decimals, int len);
+  void setCsvDecimalsAll(const uint8_t* decimals);
+  void setSerialDecimalsAll(const uint8_t* decimals);
 
   // --- Calibration simple (offset/scale) ---
   void setCalibration(uint8_t idx, float offset, float scale);
-  void setCalibrationAll(const float* offsets, const float* scales, int len);
+  void setCalibrationAll(const float* offsets, const float* scales);
 
   // --- Introspection ---
   const float* get_values() const;

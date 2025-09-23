@@ -612,12 +612,13 @@ void mesure_all_sensors(){
   char oledbuf[256];
 sensor.formatSerialToBuffer(oledbuf, sizeof(oledbuf));
 // tu peux garder ta boucle qui itère caractère par caractère sur oledbuf
+// Affichage des mesures sur l'OLED
 for (const char* p = oledbuf; *p; ++p) {
   char c = *p;
   if (c == '\n') {
-    // gérer changement de ligne OLED
+    u8x8.println(); // gérer changement de ligne OLED
   } else {
-    // u8x8.print(c);
+    u8x8.print(c);
   }
 }
 // et pour le port série:
@@ -685,7 +686,7 @@ bool get_external_parameter(uint32_t budget_ms = 60000, uint8_t max_notes = 6) {
       // Tolérer variantes/typos
       int ts = (int)JGetInt(body, "time_step");
       if (ts <= 0) ts = (int)JGetInt(body, "time_setp");
-      if (ts <= 0) ts = (int)JGetInt(body, "timestep");
+      // if (ts <= 0) ts = (int)JGetInt(body, "timestep");
       if (ts > 0) new_time_step = ts;
 
       int nm = (int)JGetInt(body, "nb_meas");
@@ -998,7 +999,7 @@ void send_data_overGSM() {
   bool ok = false;
   if (!aborted_for_time && !timed_out()) {
     unsigned long remain = remaining_s();
-    if (remain < 10UL) remain = 10UL;            // mini 10 s
+    if (remain < 10UL) remain = 10UL; // mini 10 s
     Serial.print("🔄 Sync (OUT"); if (want_in) Serial.print("+IN"); Serial.println(")...");
     delay(100);
     tp.DotStar_SetPixelColor(238, 130, 238); //violet

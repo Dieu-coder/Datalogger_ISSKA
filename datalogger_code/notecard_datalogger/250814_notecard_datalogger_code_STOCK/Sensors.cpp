@@ -61,8 +61,7 @@ uint8_t Sensors::getHealthMask() const { return HEALTH_MASK; }
 // "Vbatt;tempSHT;...;"
 void Sensors::printFileHeader(Print& out) {
   for (int i = 0; i < NB_VALUES; ++i) {
-    out.print(NAMES[i]);
-    out.print(';');
+    out.print(NAMES[i]+";");
   }
 }
 
@@ -74,8 +73,7 @@ void Sensors::printFileData(Print& out) {
       out.print(F("nan;"));
     } else {
       dtostrf((double)VALUES[i], 0, CSV_DECIMALS[i], buf);
-      out.print(buf);
-      out.print(';');
+      out.print(buf+";");
     }
   }
 }
@@ -167,6 +165,11 @@ if (rc != 0) {
   delay(5);
   tcaselect(2);
   rc = bmp.beginI2C(ALT_ADDR);
+  if (rc != 0) {
+    Serial.println("BMP581 init failed -> NaN");
+    VALUES[3] = asNaN;
+    VALUES[4] = asNaN;
+  }
 }
 
 if (rc == 0) {
@@ -182,10 +185,6 @@ if (rc == 0) {
     VALUES[3] = asNaN();
     VALUES[4] = asNaN();
   }
-} else {
-  Serial.println("BMP581 init failed -> NaN");
-  VALUES[3] = asNaN();
-  VALUES[4] = asNaN();
 }
 
   // --- Calibration (offset/scale) ---
@@ -215,17 +214,17 @@ void Sensors::setCsvDecimals(uint8_t idx, uint8_t d) {
 void Sensors::setSerialDecimals(uint8_t idx, uint8_t d) {
   if (isValidIndex(idx)) SERIAL_DECIMALS[idx] = d;
 }
-void Sensors::setCsvDecimalsAll(const uint8_t* a, int len) {
-  for (int i = 0; i < len && i < NB_VALUES; ++i) CSV_DECIMALS[i] = a[i];
+void Sensors::setCsvDecimalsAll(const uint8_t* a) {
+  for (int i = 0; i < sizeof(a) && i < NB_VALUES; ++i) CSV_DECIMALS[i] = a[i];
 }
-void Sensors::setSerialDecimalsAll(const uint8_t* a, int len) {
-  for (int i = 0; i < len && i < NB_VALUES; ++i) SERIAL_DECIMALS[i] = a[i];
+void Sensors::setSerialDecimalsAll(const uint8_t* a) {
+  for (int i = 0; i < sizeof(a) && i < NB_VALUES; ++i) SERIAL_DECIMALS[i] = a[i];
 }
 void Sensors::setCalibration(uint8_t idx, float off, float sc) {
   if (isValidIndex(idx)) { CAL_OFFSET[idx] = off; CAL_SCALE[idx] = sc; }
 }
-void Sensors::setCalibrationAll(const float* off, const float* sc, int len) {
-  for (int i = 0; i < len && i < NB_VALUES; ++i) { CAL_OFFSET[i] = off[i]; CAL_SCALE[i] = sc[i]; }
+void Sensors::setCalibrationAll(const float* off, const float* sc) {
+  for (int i = 0; i < sizeof(sc) && i < NB_VALUES; ++i) { CAL_OFFSET[i] = off[i]; CAL_SCALE[i] = sc[i]; }
 }
 
 
