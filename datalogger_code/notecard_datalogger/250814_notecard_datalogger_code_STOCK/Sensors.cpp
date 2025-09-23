@@ -215,16 +215,16 @@ void Sensors::setSerialDecimals(uint8_t idx, uint8_t d) {
   if (isValidIndex(idx)) SERIAL_DECIMALS[idx] = d;
 }
 void Sensors::setCsvDecimalsAll(const uint8_t* a) {
-  for (int i = 0; i < sizeof(a) && i < NB_VALUES; ++i) CSV_DECIMALS[i] = a[i];
+  for (int i = 0; i < (sizeof(a)/sizeof(a[0])) && i < NB_VALUES; ++i) CSV_DECIMALS[i] = a[i];
 }
 void Sensors::setSerialDecimalsAll(const uint8_t* a) {
-  for (int i = 0; i < sizeof(a) && i < NB_VALUES; ++i) SERIAL_DECIMALS[i] = a[i];
+  for (int i = 0; i < (sizeof(a)/sizeof(a[0])) && i < NB_VALUES; ++i) SERIAL_DECIMALS[i] = a[i];
 }
 void Sensors::setCalibration(uint8_t idx, float off, float sc) {
   if (isValidIndex(idx)) { CAL_OFFSET[idx] = off; CAL_SCALE[idx] = sc; }
 }
 void Sensors::setCalibrationAll(const float* off, const float* sc) {
-  for (int i = 0; i < sizeof(sc) && i < NB_VALUES; ++i) { CAL_OFFSET[i] = off[i]; CAL_SCALE[i] = sc[i]; }
+  for (int i = 0; i < (sizeof(sc)/sizeof(sc[0])) && i < NB_VALUES; ++i) { CAL_OFFSET[i] = off[i]; CAL_SCALE[i] = sc[i]; }
 }
 
 
