@@ -13,6 +13,7 @@
 #include "SHT31.h"
 #include "SparkFun_BMP581_Arduino_Library.h"
 #include <TinyPICO.h>
+#include <SparkFun_ADS122C04_ADC_Arduino_Library.h>
 #include <SensirionI2cSfmSf06.h>
 #include "SparkFun_SCD4x_Arduino_Library.h"
 
@@ -100,15 +101,17 @@ static float pchipVelocityFromSlm(float q_SLM) {
 TinyPICO tiny = TinyPICO();
 SHT31 sht;
 BMP581 bmp;
-SensirionI2cSfmSf06 sfmSf06;
-SCD4x co2_sensor(SCD4x_SENSOR_SCD41);
-//SCD4x co2_2_sensor(SCD4x_SENSOR_SCD41);
+SensirionI2cSfmSf06 sfmSf06; // SFM-SF06
+SCD4x co2_sensor(SCD4x_SENSOR_SCD41); // CO2 sensor
+SFE_ADS122C04 Pt100; // Pt100 sensor
+
+
 
 // Noms / valeurs / décimales (identiques à ta base)
-String names[] = {"Vbatt","tempSHT","humSHT","tempBMP","pressBMP","CO2_1","debitSFM","velSFM","tempSFM"};
+String names[] = {"Vbatt","tempSHT","humSHT","tempBMP","pressBMP","CO2","debitSFM","velSFM","tempSFM","tempPt"};
 const int nb_values = sizeof(names) / sizeof(names[0]);
 float values[nb_values];
-int   decimals[] = {2, 3, 1, 2, 2, 2, 6, 6, 3};
+int   decimals[] = {2, 3, 1, 2, 2, 2, 6, 6, 3, 2};
 
 // ================= Helpers internes (privés au fichier) =================
 
@@ -254,6 +257,11 @@ tca_disable();
 
 // 6) Init SFM3003 (canal 5)
 init_sfm_block_with_retry();
+
+// 7) Init Pt100 (canal 5)
+Pt100.begin();
+Pt100.configureADCmode(ADS122C04_4WIRE_MODE);
+tca_disable();
 }
 
 // ========================= API publique (identique) =========================
@@ -381,6 +389,14 @@ if (g_sfm_ok && tca_select_ok(5)) {
   }
 }
 tca_disable();
+
+// 6) Pt100 sensor that uses channel 6
+values[9] = NAN;
+
+if(tca_select_ok(6)){
+  delay(200);
+  values[9] = Pt100.readPT100Centigrade(); // It is in Celsius !
+}
 
   // (Comportement d’origine) — on termine en sélectionnant le canal 2.
   tcaselect(2);
