@@ -31,17 +31,17 @@ float start_time_programm; //time when the programm starts. Used to adjust more 
 #define MOSFET_SENSORS_PIN 14 //pin to control the power of the sensors, the screen and sd card reader
 
 //SD card
-#define SD_CS_PIN 5//Define the pin of the tinypico connected to the CS pin of the SD card reader
+#define SD_CS_PIN 5 //Define the pin of the tinypico connected to the CS pin of the SD card reader
 #define DATA_FILENAME "/data.csv"
 #define CONFIG_FILENAME "/conf.txt"
 
-//Variables which must be stored on the RTC memory, to not be erease in deep sleep (only about 4kB of storage available)
+//Variables which must be stored on the RTC memory, to not be erase in deep sleep (only about 4kB of storage available)
 RTC_DATA_ATTR int bootCount = 0;
 RTC_DATA_ATTR bool first_time = true;
-RTC_DATA_ATTR int start_time; 
+RTC_DATA_ATTR int start_time;
 RTC_DATA_ATTR int start_date_time[6]; //[year,month,day,hour,minute,second] of the starting time
 RTC_DATA_ATTR int time_step;
-RTC_DATA_ATTR bool SetRTC; //read this value from the conf.txt file on the SD card. If true we set the clock time with time on the conf.txr file
+RTC_DATA_ATTR bool SetRTC; //read this value from the conf.txt file on the SD card. If true we set the clock time with time on the conf.txt file
 
 
 //********************** MAIN LOOP OF THE PROGRAMM *******************************
@@ -86,7 +86,7 @@ void setup(){
 
     get_next_rounded_time(); //this finds the next rounded time and puts it as starting time
     first_time = false; //to make the initialization only once
-    deep_sleep_mode(0); //deep sleep until starting time 
+    deep_sleep_mode(0); //deep sleep until starting time
   }
 
   else{ //normal operation
@@ -135,7 +135,7 @@ void adjust_rtc_time_with_time_from_SD(){
 
 void put_usefull_values_on_display(){
  
-  //Display Vattery voltage
+  //Display Battery voltage
   float batvolt = tp.GetBatteryVoltage();
   u8x8.display(); // Power on the OLED display
   u8x8.clear();
@@ -208,7 +208,7 @@ void get_next_rounded_time(){
   Serial.println(start_datetime.timestamp(DateTime::TIMESTAMP_FULL));
 }
 
-void initialise_SD_card(){ //open SD card. Write header in the data.csv file. read values from the conf.txt file.
+void initialise_SD_card(){ //open SD card. Write header in the data.csv file. Read values from the conf.txt file.
 
   //initialisation
   bool SD_error = false;
@@ -266,7 +266,7 @@ void initialise_SD_card(){ //open SD card. Write header in the data.csv file. re
     }
   }
 
-  //display error or success message, wether ther was an error or not
+  //display error or success message, whether ther was an error or not
   u8x8.setCursor(0, 2);
   if (SD_error == true){
     u8x8.print("SD Failure !");
@@ -313,7 +313,7 @@ String readRTC() { //print current time
   return time_str;
 }
 
-void save_data_in_SD(){ 
+void save_data_in_SD(){
   //put the measured values in a string with the following format: "ID;DateTime;VBatt;tempEXT;pressEXT;HumExt;..." 
   String data_message = (String) bootCount;
   char buffer [35] = "";
