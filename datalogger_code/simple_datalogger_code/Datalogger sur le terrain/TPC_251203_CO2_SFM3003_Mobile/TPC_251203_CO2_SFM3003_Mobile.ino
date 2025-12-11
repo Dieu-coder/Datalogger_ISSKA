@@ -10,37 +10,24 @@ If you have any questions contact me per email at nicolas.schmid.6035@gmail.com
 **********************************************************************************
 */  
 
-// Declare functions
-
-
-
 #include <Wire.h>
 #include <TinyPICO.h>
 #include <RTClib.h>
 #include <SD.h>
 #include <U8x8lib.h>
 #include "Sensors.h" //file sensor.cpp and sensor.h must be in the same folder
-#include "Pump.h"
 
 TinyPICO tp = TinyPICO();
 RTC_DS3231 rtc; 
 U8X8_SSD1306_128X64_NONAME_HW_I2C u8x8(/* reset=*/ U8X8_PIN_NONE); //initialise something for the OLED display
 Sensors sensor = Sensors();
-Pump pump;
-
-#define rx 32                                          //define what pin rx is going to be
-#define tx 33  
-String inputstring = "";                              //a string to hold incoming data from the PC
-String devicestring = "";                             //a string to hold the data from the Atlas Scientific product
-boolean device_string_complete = false;               //have we received all the data from the Atlas Scientific product
-float ml;   
 
 
 int SD_date_time[6]; //[year,month,day,hour,minute,second]
 float start_time_programm; //time when the programm starts. Used to adjust more precisely the rtc clock
 
 //PINS to power different devices
-#define Enable5VPIN 27 //turns the 3V to 5V converter on if switched to high
+#define Enable5VPIN 25 //turns the 3V to 5V converter on if switched to high
 #define MOSFET_SENSORS_PIN 14 //pin to control the power of the sensors, the screen and sd card reader
 
 //SD card
@@ -57,18 +44,6 @@ RTC_DATA_ATTR int time_step;
 RTC_DATA_ATTR bool SetRTC; //read this value from the conf.txt file on the SD card. If true we set the clock time with time on the conf.txr file
 
 
-
-
-void power_external_device();
-void adjust_rtc_time_with_time_from_SD();
-void put_usefull_values_on_display();
-void get_next_rounded_time();
-void initialise_SD_card();
-void deep_sleep_mode(int sleeping_time);
-String readRTC();
-void save_data_in_SD();
-void mesure_all_sensors();
-
 //********************** MAIN LOOP OF THE PROGRAMM *******************************
 //The setup is recalled each time the micrcontroller wakes up from a deepsleep
 void setup(){ 
@@ -77,10 +52,15 @@ void setup(){
 
   //Start serial communication protocol with external devices (e.g. your computer)
   Serial.begin(115200);
-  Serial2.begin(9600, SERIAL_8N1, rx, tx);  
+
   power_external_device();
-  Wire.begin(); // initialize I2C bus 
-  Wire.setClock(50000); // set I2C clock frequency to 50kHz
+
+  delay(60);
+  Wire.end();
+  Wire.begin();
+  Wire.setTimeOut(200);   // évite un lock Wire infini
+  Wire.setClock(50000);
+
   if(first_time){ //this snipet is only executed when the microcontroller is turned on for the first time
     tp.DotStar_SetPower(true); //This method turns on the Dotstar power switch, which enables the tinypico LED
     tp.DotStar_SetPixelColor(25, 25, 25 ); //Turn the LED white while SD card is not initialised
@@ -96,18 +76,14 @@ void setup(){
     delay(2000); //wait 2 seconds to see the led and the screen 
 
     initialise_SD_card();  //read conf.txt file values and store them on RTC memory to access them rapidely, write header on data.csv
+
     //initialise the RTC clock
     rtc.begin();
     rtc.disable32K(); //The 32kHz output is enabled by default. We don't need it so we disable it
     if (SetRTC) adjust_rtc_time_with_time_from_SD();
-    
-    pump.configure(time_step, u8x8);
-    pump.displayConfiguration(u8x8);
-        
+
     put_usefull_values_on_display(); // show RTC time, battery voltage, time step and sensors values on the display
 
-
-    
     get_next_rounded_time(); //this finds the next rounded time and puts it as starting time
     first_time = false; //to make the initialization only once
     deep_sleep_mode(0); //deep sleep until starting time 
@@ -118,7 +94,7 @@ void setup(){
     Serial.print("***********Starting the card, Boot count: ");
     Serial.print(bootCount);
     Serial.println(" ***********************");
-    
+    delay(100);
     //setup for the clock
     rtc.begin();
     rtc.disable32K(); //The 32kHz output is enabled by default. We don't need it so we disable it
@@ -130,7 +106,7 @@ void setup(){
     }
 
     mesure_all_sensors();
-    pump.handleInjections2(bootCount, time_step);
+
     if(tp.GetBatteryVoltage()>3.3){
       deep_sleep_mode(time_step);
     }
@@ -271,11 +247,6 @@ void initialise_SD_card(){ //open SD card. Write header in the data.csv file. re
       SD_date_time[3] = configFile.readStringUntil(':').toInt(); //hour
       SD_date_time[4] = configFile.readStringUntil(':').toInt(); //minute
       SD_date_time[5] = configFile.readStringUntil(';').toInt(); //second
-      while (configFile.peek() != '\n'){ //if there are any black space if the config file
-        configFile.seek(configFile.position() + 1);
-      }
-      configFile.seek(configFile.position() + 1); //to remove the \n character itself
-
     }
     configFile.close();
 
@@ -293,7 +264,6 @@ void initialise_SD_card(){ //open SD card. Write header in the data.csv file. re
       }
       Serial.println();
     }
-
   }
 
   //display error or success message, wether ther was an error or not
@@ -309,11 +279,8 @@ void initialise_SD_card(){ //open SD card. Write header in the data.csv file. re
     dataFile.println();
     dataFile.println();
     dataFile.println();
-  dataFile.print("ID;DateTime;");
-  // Append sensor header and pump header fragment for merged CSV
-  dataFile.print(header);
-  dataFile.print(pump.getCSVHeader());
-  dataFile.println();
+    dataFile.print("ID;DateTime;");
+    dataFile.println(header);
     dataFile.close();
     // show on display and LED if values on SD card are OK
     u8x8.setCursor(0, 2);
@@ -325,7 +292,7 @@ void initialise_SD_card(){ //open SD card. Write header in the data.csv file. re
 
 void deep_sleep_mode(int sleeping_time){ 
   //turn off all things that might consume some power
-  //digitalWrite(MOSFET_SENSORS_PIN, LOW);
+  digitalWrite(MOSFET_SENSORS_PIN, LOW);
   tp.DotStar_SetPower(false); //LED of the TinyPico
   rtc.writeSqwPinMode(DS3231_OFF);
   //set alarm on RTC
@@ -356,9 +323,6 @@ void save_data_in_SD(){
   data_message = data_message + ";"+ buffer + ";";
   String sensor_data = sensor.getFileData(); 
   data_message = data_message + sensor_data;
-  // Append pump fields to the same CSV line. This keeps pump modular: if pump is removed,
-  // remove this single call and the pump include/declaration in main.
-  data_message = data_message + pump.getCSVFields();
   Serial.println(data_message);
 
   //initialise SD card

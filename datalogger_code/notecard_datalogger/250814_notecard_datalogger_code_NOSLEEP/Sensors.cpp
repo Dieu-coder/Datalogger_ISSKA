@@ -21,44 +21,31 @@ If you have any questions contact me per email at nicolas.schmid.6035@gmail.com
 #include "Sensors.h"
 #include "SHT31.h"
 #include "SparkFun_BMP581_Arduino_Library.h"
-#include "AtlasHumidityUART.h"
 
 // ===== PCB parameters =====
 static const uint8_t I2C_MUX_ADDRESS       = 0x73;
 static const uint8_t BMP581_SENSOR_ADDRESS = 0x46;
 static const uint8_t SHT35_SENSOR_ADDRESS  = 0x44; // (au cas où)
 
-#define TX_Atlas 33
-#define RX_Atlas 32
-#define AtlasSerial Serial2
-
 // ===== Instances =====
 static TinyPICO tiny;
 static SHT31    sht;
 static BMP581   bmp;
-static AtlasHumidityUART atlasHum(AtlasSerial);
 
 // ===== Names & values (same order everywhere) =====
-static const char* const NAMES[] = { "Vbatt", "tempSHT", "humSHT", "tempBMP", "pressBMP","HUM","TEMP","DEW" };
+static const char* const NAMES[] = { "Vbatt", "tempSHT", "humSHT", "tempBMP", "pressBMP" };
 static const int   NB_VALUES = sizeof(NAMES) / sizeof(NAMES[0]);
 static float       VALUES[NB_VALUES];         // valeurs courantes
 static uint8_t     HEALTH_MASK = 0;           // bit0=SHT ok, bit1=BMP ok, etc.
-// (optionnel, mais plus lisible)
-static const uint8_t HEALTH_SHT   = 0x01;
-static const uint8_t HEALTH_BMP   = 0x02;
-static const uint8_t HEALTH_ATLAS = 0x04;
-
-static bool atlas_inited = false;
-
 
 // ===== Per-sensor decimals (modifiable) =====
 // CSV: ce qui va dans le fichier ; Serial: ce qui s'affiche sur Serial/OLED
-static uint8_t CSV_DECIMALS[NB_VALUES]    = { 2, 3, 2, 3, 1, 2, 3, 2 };
-static uint8_t SERIAL_DECIMALS[NB_VALUES] = { 1, 1, 1, 1, 0, 1, 1, 1 };
+static uint8_t CSV_DECIMALS[NB_VALUES]    = { 2, 3, 2, 3, 1 };
+static uint8_t SERIAL_DECIMALS[NB_VALUES] = { 1, 1, 1, 1, 0 };
 
 // ===== Simple calibration (offset + scale) =====
-static float CAL_OFFSET[NB_VALUES] = { 0, 0, 0, 0, 0, 0, 0, 0 };
-static float CAL_SCALE [NB_VALUES] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+static float CAL_OFFSET[NB_VALUES] = { 0, 0, 0, 0, 0 };
+static float CAL_SCALE [NB_VALUES] = { 1, 1, 1, 1, 1 };
 
 // ===== Helpers =====
 static inline bool  isValidIndex(uint8_t i) { return i < NB_VALUES; }
@@ -151,7 +138,7 @@ void Sensors::measure() {
   if (sht_ok) {
     VALUES[1] = sht.getTemperature();   // tempSHT
     VALUES[2] = sht.getHumidity();      // humSHT
-    HEALTH_MASK |= HEALTH_SHT;
+    HEALTH_MASK |= 0x01;
   } else {
     VALUES[1] = asNaN();
     VALUES[2] = asNaN();
@@ -189,7 +176,7 @@ if (rc == 0) {
   if (err == 0) {
     VALUES[3] = data.temperature;              // tempBMP
     VALUES[4] = (float)data.pressure * 0.01f;  // mbar
-    HEALTH_MASK |= HEALTH_BMP;
+    HEALTH_MASK |= 0x02;
   } else {
     Serial.println("BMP581 read failed -> NaN");
     VALUES[3] = asNaN();
@@ -200,61 +187,6 @@ if (rc == 0) {
   VALUES[3] = asNaN();
   VALUES[4] = asNaN();
 }
-
-    // --- Humidity ATLAS (TCA7) ---
-  delay(50);
-  tcaselect(7);
-  delay(500);  // petite marge après le MUX
-
-  // DeepSleep -> on ré-initialise à chaque boot
-  AtlasSerial.begin(9600, SERIAL_8N1, RX_Atlas, TX_Atlas); // RX, TX
-  delay(50);
-  atlasHum.begin();
-  delay(5000);
-
-  // Vider le buffer UART au cas où le capteur envoyait déjà quelque chose
-  while (AtlasSerial.available()) {
-    AtlasSerial.read();
-  }
-
-  float humidity    = NAN;
-  float temperature = NAN;
-  float dewPoint    = NAN;
-
-  bool atlas_ok = false;
-
-  const unsigned long ATLAS_TIMEOUT_MS     = 4000;  // temps max d'attente total
-  const unsigned long ATLAS_RETRY_INTERVAL = 200;   // délai entre 2 essais
-
-  unsigned long start = millis();
-  while ((millis() - start) < ATLAS_TIMEOUT_MS) {
-    if (atlasHum.read(humidity, temperature, dewPoint)) {
-      // *** IMPORTANT ***
-      // Au 1er boot après deep-sleep, la lib te renvoie visiblement 0,0,0.
-      // On considère cette trame comme NON valide.
-      if (!(humidity == 0.0f && temperature == 0.0f && dewPoint == -19.0f)) {
-        atlas_ok = true;
-        break;
-      }
-      // sinon : on continue à attendre une vraie mesure
-    }
-    delay(ATLAS_RETRY_INTERVAL);
-  }
-
-  if (atlas_ok) {
-    VALUES[5] = humidity;      // HUM
-    VALUES[6] = temperature;   // TEMP
-    VALUES[7] = dewPoint;      // DEW
-    HEALTH_MASK |= 0x04;       // bit Atlas OK (3e bit)
-  } else {
-    Serial.println(F("ATLAS: pas de mesure valide -> NaN"));
-    VALUES[5] = asNaN();
-    VALUES[6] = asNaN();
-    VALUES[7] = asNaN();
-    // pas de bit santé pour Atlas
-  }
-
-
 
   // --- Calibration (offset/scale) ---
   for (int i = 0; i < NB_VALUES; ++i) {

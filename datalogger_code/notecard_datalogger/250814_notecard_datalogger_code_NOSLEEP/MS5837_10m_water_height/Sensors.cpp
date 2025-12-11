@@ -29,7 +29,7 @@ If you have any questions contact me per email at nicolas.schmid.6035@gmail.com
 #include "SparkFun_BMP581_Arduino_Library.h"
 #include <TinyPICO.h>
 #include "MS5837.h"
-#include "Pump.h"
+
 //parameters which depend on the PCB version
 #define I2C_MUX_ADDRESS 0x73 //I2C adress of the multiplexer set on the PCB
 #define BMP581_sensor_ADRESS 0x46 //I2C adress of the BMP581 set on the PCB
@@ -40,6 +40,7 @@ TinyPICO tiny = TinyPICO();
 SHT31 sht;
 BMP581 bmp;
 MS5837 ms5837_sensor;
+
 //declare arrays where the names and values of the sensors are stored
 String names[]={"Vbatt","tempSHT","humSHT","tempBMP","pressBMP","pressMS","tempMS","htWat"};
 const int nb_values = sizeof(names)/sizeof(names[0]);
@@ -79,11 +80,7 @@ String Sensors::serialPrint() { //Display sensor mesures to Serial for debug pur
   for(int i = 0; i< nb_values; i++){
     sensor_display_str = sensor_display_str + names[i]+": "+String(values[i],1) + "\n";
   }
-  // Remove the last \n character
-  if (sensor_display_str.length() > 0) {
-    sensor_display_str = sensor_display_str.substring(0, sensor_display_str.length() - 1);
-  }
-  Serial.println(sensor_display_str);
+  Serial.print(sensor_display_str);
   return sensor_display_str;
 }
 
@@ -102,17 +99,7 @@ void Sensors::measure() {
   values[1]=sht.getTemperature(); //tempSHT
   values[2]=sht.getHumidity(); //humSHT
 
-  //connect and start the BMP581 PCB sensor 
-  tcaselect(2);
-  delay(3);
-  bmp.beginI2C(BMP581_sensor_ADRESS);
-  delay(5);
-  bmp5_sensor_data data = {0,0};
-  int8_t err = bmp.getSensorData(&data);
-  values[3]=data.temperature; //tempBMP
-  values[4]=data.pressure/100; //pressBMP (in millibar)
-
-  //change the I2C frequency for the long cable
+    //change the I2C frequency for the long cable
   Wire.end();
   Wire.begin();
   Wire.setClock(5000);
@@ -133,19 +120,30 @@ void Sensors::measure() {
   values[6]=ms5837_sensor.temperature();
   if(values[5]>4030){values[5]=0;}
   if(values[6]<-50){values[6]=0;}
-  tcaselect(0); //select another i2c channel to avoid interferences
+    //connect and start the BMP581 PCB sensor 
+  delay(300);
+  tcaselect(2);
+  delay(300);
+  bmp.beginI2C(BMP581_sensor_ADRESS);
   delay(5);
+  bmp5_sensor_data data = {0,0};
+  int8_t err = bmp.getSensorData(&data);
+  values[3]=data.temperature; //tempBMP
+  values[4]=data.pressure/100; //pressBMP (in millibar)
+  delay(500);
+  tcaselect(0); //select another i2c channel to avoid interferences
+  delay(500);
   //change back to the original I2C frequency
   Wire.end();
   Wire.begin();
   Wire.setClock(50000);
   delay(50);
-  values[7] = 2.5 + (values[5]-values[4])*10/9.81;//water height in cm is (water_pressur-air_pressure)*10/g
-  measuredWaterheight = values[7];
-  
-  delay(1000);
+  values[7] = (values[5]-values[4])*10/9.81;//water height in cm is (water_pressur-air_pressure)*10/g
+  delay(500);
 
-  
+
+
+
   //put here the measurement of other sensors!!!
 }
 

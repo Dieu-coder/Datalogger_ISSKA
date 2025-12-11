@@ -21,6 +21,9 @@ If you have any questions contact me per email at nicolas.schmid.6035@gmail.com
 #include <U8x8lib.h>
 #include "Sensors.h" //file sensor.cpp and sensor.h must be in the same folder¨
 #include <Notecard.h>
+#include "driver/rtc_io.h"
+#include "esp_sleep.h"
+#include <Preferences.h>
 
 TinyPICO tp = TinyPICO();
 RTC_DS3231 rtc; 
@@ -43,6 +46,10 @@ Notecard notecard;
 #define DATA_FILENAME "/data.csv"
 #define CONFIG_FILENAME "/conf.txt"
 
+Preferences prefs;
+RTC_DATA_ATTR uint32_t rtc_magic = 0;
+#define MAGIC 0xA55A1234
+
 //Variables which must be stored on the RTC memory, to not be erease in deep sleep (only about 4kB of storage available)
 RTC_DATA_ATTR int bootCount_since_change = 0; //boot count since external change from notehub
 RTC_DATA_ATTR int bootCount = 0;
@@ -55,51 +62,55 @@ RTC_DATA_ATTR bool SetRTC; //read this value from the conf.txt file on the SD ca
 RTC_DATA_ATTR int failed_sync_count = 0;
 RTC_DATA_ATTR int inbound_period = 4;  // 1 sync IN toutes les 4 séances d’envoi par défaut
 RTC_DATA_ATTR uint32_t send_success_count = 0;  // # de sync OUT réussies depuis le boot
+RTC_DATA_ATTR bool g_nc_inited = false;   // persiste mais on le remettra à true quand on init
+RTC_DATA_ATTR bool nc_keep_on = false;
+RTC_DATA_ATTR bool keep_nc_next_sleep = false;
 
 
 // =================== HELPERS ===================
 
-static void log_radio_status_once() {
+static void ensure_config_valid() {
+  if (time_step <= 0 || time_step > 24*3600) {
+    Serial.println("⚠️ time_step invalide → fallback 300s");
+    time_step = 300;
+  }
+  if (nb_meas_sent_at_once <= 0 || nb_meas_sent_at_once > 300) {
+    Serial.println("⚠️ nb_meas_sent_at_once invalide → fallback 1");
+    nb_meas_sent_at_once = 1;
+  }
+  if (inbound_period <= 0) inbound_period = 4;
+  if (start_time <= 0) {
+    Serial.println("⚠️ start_time invalide → recalcul");
+    get_next_rounded_time();
+  }
+}
+// seconds until next RTC alarm (si sleeping_time==0 on calcule depuis start_time)
+static uint32_t seconds_until_next_alarm(int sleeping_time) {
+  DateTime now = rtc.now();
+  long target = (long)start_time + (long)bootCount_since_change * (long)sleeping_time;
+  long delta  = target - (long)now.unixtime();
+  if (delta < 5)  delta = 5;                    // marge min
+  if (delta > 86400L) delta = 86400L;           // clamp 24 h (sécurité)
+  return (uint32_t)delta;
+}
+
+// Demande à la Notecard de couper le modem et de dormir pendant N secondes
+static void notecard_prepare_for_sleep(uint32_t seconds) {
   sensor.tcaselect(NOTECARD_I2C_MULTIPLEXER_CHANNEL);
-  J *rsp = notecard.requestAndResponse(notecard.newRequest("card.wireless"));
-  if (rsp) {
-    J *net = JGetObjectItem(rsp, "net");
-    const char *status = net ? JGetString(net, "status") : "?";
-    long bars = net ? JGetInt(net, "bars") : -1;
-    Serial.printf("📶 radio: status=%s, bars=%ld\n", status, bars);
-    notecard.deleteResponse(rsp);
-  }
+
+  // coupe la radio rapidement
+  J *w = notecard.newRequest("card.wireless");
+  JAddStringToObject(w, "mode", "off");
+  notecard.sendRequest(w);
+
+  // sommeil temporisé côté Notecard (elle restera alimentée mais en veille profonde)
+  J *sl = notecard.newRequest("card.sleep");
+  JAddNumberToObject(sl, "seconds", (double)seconds);
+  notecard.sendRequest(sl);
+
   sensor.tcaselect(0);
 }
-static void i2c_bus_hard_reset(int sda=21, int scl=22) {
-  // Libère le bus si SDA reste LOW (9 pulses SCL)
-  pinMode(sda, INPUT_PULLUP);
-  pinMode(scl, INPUT_PULLUP);
-  delay(2);
 
-  if (digitalRead(sda) == LOW) {
-    pinMode(scl, OUTPUT);
-    for (int i=0; i<9 && digitalRead(sda)==LOW; ++i) {
-      digitalWrite(scl, LOW);  delayMicroseconds(5);
-      digitalWrite(scl, HIGH); delayMicroseconds(5);
-    }
-  }
-
-  // Recréer le driver proprement
-  Wire.end();
-  pinMode(sda, INPUT_PULLUP);
-  pinMode(scl, INPUT_PULLUP);
-  delay(1);
-  Wire.begin();
-  Wire.setTimeout(300);
-  Wire.setClock(100000);
-}
-
-static void releaseNotecardBus() {
-  // Si le TCA (rail capteurs) est coupé, ne surtout pas parler I2C
-  if (digitalRead(MOSFET_SENSORS_PIN) == LOW) return;
-  sensor.tcaselect(0);
-}
 // -- DEBUG: impression du body JSON en streaming, sans JPrint ni copies --
 static void print_json_body_chunk(J *body, const char* const* sensor_names, int ns) {
   if (!body) { Serial.println("BODY: (null)"); return; }
@@ -180,24 +191,16 @@ static bool wait_for_network(unsigned long max_wait_s = 120,
   Serial.println("⏱️ modem pas prêt (timeout)");
   return false;
 }
-static bool sync_once(bool want_in, unsigned long timeout_s = 190) {
+static bool sync_once(bool want_in, unsigned long timeout_s = 300) {
   J *req = notecard.newRequest("hub.sync");
   JAddBoolToObject(req, "out", true);
   if (want_in) JAddBoolToObject(req, "in", true);
   notecard.sendRequest(req);
   return wait_sync_completed(timeout_s);
 }
-// INBOUND uniquement (pull → court)
-static bool sync_in(unsigned long timeout_s = 190) {
-  J* req = notecard.newRequest("hub.sync");
-  JAddBoolToObject(req, "in", true);
-  notecard.sendRequest(req);
-  return wait_sync_completed(timeout_s);
-}
 
-static void powerOffNotecard() {
-  digitalWrite(MOSFET_NOTECARD_PIN, LOW);
-  sensor.tcaselect(0);
+static void releaseNotecardBus() {
+  sensor.tcaselect(0);   // on sort du canal TCA3
 }
 
 static bool wait_sync_completed(unsigned long timeout_s) {
@@ -219,65 +222,63 @@ static bool wait_sync_completed(unsigned long timeout_s) {
 }
 
 // OUTBOUND uniquement (push → court)
-static bool sync_out(unsigned long timeout_s = 190) {
+static bool sync_out(unsigned long timeout_s = 300) {
   J* req = notecard.newRequest("hub.sync");
   JAddBoolToObject(req, "out", true);
   notecard.sendRequest(req);
   return wait_sync_completed(timeout_s);
 }
 
-static bool initialize_notecard_safe() {
-  const uint32_t T_INIT_BUDGET_MS = 10000;  // budget total d'init
-  uint32_t t0 = millis();
-
-  // Alimente la Notecard et bascule le TCA sur son canal
-  digitalWrite(MOSFET_NOTECARD_PIN, HIGH);
-  delay(30);
-  sensor.tcaselect(NOTECARD_I2C_MULTIPLEXER_CHANNEL);
-  delay(300);  // petit temps de boot
-
-  // 2 tentatives : tentative directe, puis reset bus + power-cycle
-  for (int attempt = 0; attempt < 2; ++attempt) {
-    delay(100);
-    notecard.begin();
-    delay(600);
-
-    // Handshake minimal
-    J *ver = notecard.requestAndResponse(notecard.newRequest("card.version"));
-    if (ver) {
-      notecard.deleteResponse(ver);
-
-      // Config minimale, ne dépend pas de l’attache réseau
-      J *req_set = notecard.newRequest("hub.set");
-      JAddStringToObject(req_set, "product", myProductID);
-      JAddStringToObject(req_set, "mode", "minimum");
-      notecard.sendRequest(req_set);
-
-      J *w = notecard.newRequest("card.wireless");
-      JAddStringToObject(w, "mode", DESIRED_RAT);  // "m", "nb", "auto"
-      notecard.sendRequest(w);
-
-      // ✅ SUCCÈS : on RESTE sur canal 3 et on laisse la Notecard ON
-      return true;
-    }
-
-    // Échec : reset bus + power-cycle rapide, puis re-tente
-    Serial.println("❌ Notecard: pas de réponse, reset I2C + power-cycle");
-    i2c_bus_hard_reset();
-    digitalWrite(MOSFET_NOTECARD_PIN, LOW);
-    delay(150);
-    digitalWrite(MOSFET_NOTECARD_PIN, HIGH);
-    delay(400);
-
-    if (millis() - t0 > T_INIT_BUDGET_MS) break;
-  }
-
-  // ⛔ Abandon : on repasse canal 0 et on coupe la Notecard
-  sensor.tcaselect(0);
-  digitalWrite(MOSFET_NOTECARD_PIN, LOW);
-  return false;
+// INBOUND uniquement (pull → court)
+static bool sync_in(unsigned long timeout_s = 90) {
+  J* req = notecard.newRequest("hub.sync");
+  JAddBoolToObject(req, "in", true);
+  notecard.sendRequest(req);
+  return wait_sync_completed(timeout_s);
 }
 
+static bool initialize_notecard_safe() {
+  digitalWrite(MOSFET_NOTECARD_PIN, LOW);
+  sensor.tcaselect(NOTECARD_I2C_MULTIPLEXER_CHANNEL);
+  delay(30);
+
+  notecard.begin();
+  delay(500);
+
+  // Handshake: s'assurer que la carte répond
+  J *ver = notecard.requestAndResponse(notecard.newRequest("card.version"));
+  if (!ver) {
+    Serial.println("❌ Notecard: pas de réponse à card.version");
+    sensor.tcaselect(0);
+    //digitalWrite(MOSFET_NOTECARD_PIN, LOW);
+    return false;
+  }
+  notecard.deleteResponse(ver);
+
+  // hub + RAT
+  J *req_set = notecard.newRequest("hub.set");
+  JAddStringToObject(req_set, "product", myProductID);
+  JAddStringToObject(req_set, "mode", "minimum");
+  notecard.sendRequest(req_set);
+
+  J *w = notecard.newRequest("card.wireless");
+  JAddStringToObject(w, "mode", DESIRED_RAT);   // "m" / "nb" / "auto"
+  notecard.sendRequest(w);
+
+  // Log bars (optionnel)
+  J *rsp = notecard.requestAndResponse(notecard.newRequest("card.wireless"));
+  if (rsp) {
+    J *net = JGetObjectItem(rsp,"net");
+    int bars = net ? (int)JGetNumber(net,"bars") : -1;
+    Serial.print("Wireless set, bars="); Serial.println(bars);
+    notecard.deleteResponse(rsp);
+  }
+
+  // en fin de fonction après les réglages
+g_nc_inited = true;
+nc_keep_on  = true;   // tu l’avais déjà
+return true;
+}
 
 //********************** MAIN LOOP OF THE PROGRAMM *******************************
 //The setup is recalled each time the micrcontroller wakes up from a deepsleep
@@ -285,22 +286,51 @@ void setup(){
 
   //Start serial communication protocol with external devices (e.g. your computer)
   Serial.begin(115200);
+  delay(150);
+  prefs.begin("app", false);
+
+  // How did we wake?
+esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+bool was_ds = (cause != ESP_SLEEP_WAKEUP_UNDEFINED) || (rtc_magic == MAGIC);
+
+// Consume the token so a later SW_RESET doesn’t look like deep sleep
+rtc_magic = 0;
+
+first_time = !was_ds;
+
+// Restore counters from NVS only if NOT first boot
+if (!first_time) {
+  bootCount              = prefs.getInt("bootCount", 0);
+  bootCount_since_change = prefs.getInt("bootSince", 0);
+  send_success_count     = prefs.getULong("sendOK", 0);
+  failed_sync_count      = prefs.getInt("failSync", 0);
+  inbound_period         = prefs.getInt("inbN", inbound_period);
+  start_time             = prefs.getInt("start", start_time);
+  for (int i=0;i<6;i++){ char k[8]; sprintf(k,"sd%d",i); start_date_time[i]=prefs.getInt(k,start_date_time[i]); }
+}
+prefs.end();
+
+// IMPORTANT : au réveil, les GPIO peuvent être "holdés".
+// On libère le hold global + celui du pin Notecard avant de le reconfigurer.
+   gpio_deep_sleep_hold_dis();
+   gpio_hold_dis((gpio_num_t)MOSFET_NOTECARD_PIN);
 
   power_external_device();
 
   Wire.begin(); // initialize I2C bus 
-  //Wire.setTimeout(25);
-  Wire.setClock(50000); // set I2C clock frequency to 50kHz
-  sensor.tcaselect(0); 
+  Wire.setTimeout(25);
+  Wire.setClock(100000); // set I2C clock frequency to 50kHz
+
+  // ✅ OLED: toujours re-begin car on l’a coupée pendant le deep-sleep
+u8x8.begin();
+u8x8.setBusClock(50000);
+u8x8.setFont(u8x8_font_amstrad_cpc_extended_r);
 
   if(first_time){ //this snipet is only executed when the microcontroller is turned on for the first time
     tp.DotStar_SetPower(true); //This method turns on the Dotstar power switch, which enables the tinypico LED
     tp.DotStar_SetPixelColor(25, 25, 25 ); //Turn the LED white while SD card is not initialised
 
     //write Init on the display
-    u8x8.begin();
-    u8x8.setBusClock(50000); //Give the I2C frequency information to the display
-    u8x8.setFont(u8x8_font_amstrad_cpc_extended_r); //set the font
     u8x8.setCursor(0, 0);
     u8x8.print("Init...");
     Serial.println("Init...");
@@ -337,6 +367,7 @@ void setup(){
     rtc.begin();
     rtc.disable32K(); //The 32kHz output is enabled by default. We don't need it so we disable it
     readRTC();//print current time
+    ensure_config_valid();
 
     if (bootCount<=3){ //Turn the LED blue during first 3 measurements ( only to check that the logger works normally)
       tp.DotStar_SetPower(true);
@@ -345,15 +376,17 @@ void setup(){
 
     mesure_all_sensors();
 
-    if (bootCount_since_change%nb_meas_sent_at_once == 0){ //after a number nb_meas_sent_at_once of measurements, send the last few stored measurements over GSM
+    int nsend = (nb_meas_sent_at_once > 0) ? nb_meas_sent_at_once : 1;
+    if ((bootCount_since_change % nsend) == 0) {
       send_data_overGSM();
     }
 
-    if(tp.GetBatteryVoltage()>3.5){
+    if(tp.GetBatteryVoltage()>3.4){
       deep_sleep_mode(time_step);
     }
     else{
-      deep_sleep_mode(60*60*24*365*10); //sleep during ten years (don't wake up) to avoid damaging the battery
+      digitalWrite(MOSFET_NOTECARD_PIN, HIGH);
+      deep_sleep_mode(10800); //sleep during ten years (don't wake up) to avoid damaging the battery
     }
   }
 }
@@ -365,9 +398,15 @@ void power_external_device(){
   //Turn on Pin to control the gate of MOSFET for all the sensors, display and microSD card(turned on)
   pinMode(MOSFET_SENSORS_PIN, OUTPUT);
   digitalWrite(MOSFET_SENSORS_PIN, HIGH);
+
+  //Pin to control the gate of MOSFET for notecard (turned off)
   pinMode(MOSFET_NOTECARD_PIN, OUTPUT);
   digitalWrite(MOSFET_NOTECARD_PIN, LOW);
-  delay(50);
+
+  // >>> Désactiver le boost 5V <<<
+  pinMode(Enable5VPIN, OUTPUT);
+  digitalWrite(Enable5VPIN, LOW);
+
 }
 
 void put_usefull_values_on_display(){
@@ -552,18 +591,56 @@ void initialise_SD_card(){ //open SD card. Write header in the data.csv file. re
 }
 
 void deep_sleep_mode(int sleeping_time){ 
-  //turn off all things that might consume some power
-  digitalWrite(MOSFET_SENSORS_PIN, LOW);
-  digitalWrite(MOSFET_NOTECARD_PIN, LOW);
-  tp.DotStar_SetPower(false); //LED of the TinyPico
+  // --- 0) Calcul de l’instant de réveil ---
+  uint32_t wake_epoch = start_time + bootCount_since_change * sleeping_time;
+
+  // --- 1) Assure-toi que le TCA n’est pas sur la Notecard, pour éviter du back-power ---
+  sensor.tcaselect(0);
+
+  // --- 2) Programmer la RTC TANT QUE I²C est actif ---
   rtc.writeSqwPinMode(DS3231_OFF);
-  //set alarm on RTC
-  rtc.clearAlarm(1); //to clear a potentially previously set alarm set on alarm1
-  rtc.disableAlarm(2); //disable alarm2 to ensure that no previously set alarm causes any problem
-  rtc.setAlarm1(start_time+bootCount_since_change*sleeping_time,DS3231_A1_Hour);  
-  pinMode(GPIO_NUM_15, INPUT_PULLUP);
-  //specify wakeup trigger and enter deep sleep
-  esp_sleep_enable_ext0_wakeup(GPIO_NUM_15, 0); //2nd param. is logical level of trigger signal (tinypico is wake-up when signal is low in this case)
+  rtc.clearAlarm(1);
+  rtc.disableAlarm(2);
+  rtc.setAlarm1(wake_epoch, DS3231_A1_Hour);
+
+  // GPIO du réveil (si pas de pull-up externe, garde INPUT_PULLUP)
+  pinMode(GPIO_NUM_15, INPUT);               // ou INPUT_PULLUP si besoin
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_15, 0);
+
+  // --- 3) Couper toutes les charges avant le sleep ---
+  // Notecard : OFF à chaque sleep (comme demandé)
+  digitalWrite(MOSFET_NOTECARD_PIN, HIGH);
+
+  // Capteurs / OLED / SD / 5V
+  u8x8.setPowerSave(1);
+  digitalWrite(MOSFET_SENSORS_PIN, LOW);
+  digitalWrite(Enable5VPIN, LOW);
+  tp.DotStar_SetPower(false);
+
+  // --- 4) Libérer les bus pour traquer les µA résiduels ---
+  Wire.end();                // maintenant seulement !
+  pinMode(21, INPUT);        // SDA
+  pinMode(22, INPUT);        // SCL
+  pinMode(5,  INPUT);        // SD-CS
+  pinMode(18, INPUT);        // SCK
+  pinMode(19, INPUT);        // MISO
+  pinMode(23, INPUT);        // MOSI
+
+  // Leave a “deep-sleep token” for next boot
+rtc_magic = MAGIC;
+
+// Persist counters/settings so a SW_RESET won’t lose them
+prefs.begin("app", false);
+prefs.putInt("bootCount",  bootCount);
+prefs.putInt("bootSince",  bootCount_since_change);
+prefs.putULong("sendOK",   send_success_count);
+prefs.putInt("failSync",   failed_sync_count);
+prefs.putInt("inbN",       inbound_period);
+prefs.putInt("start",      start_time);
+for (int i=0;i<6;i++){ char k[8]; sprintf(k,"sd%d",i); prefs.putInt(k,start_date_time[i]); }
+prefs.end();
+
+  // --- 5) Dodo ---
   esp_deep_sleep_start();
 }
 
@@ -626,125 +703,86 @@ sensor.printSerial(Serial);
 }
 
 
-bool get_external_parameter(uint32_t budget_ms = 60000, uint8_t max_notes = 6) {
-  const uint32_t MIN_SLICE_MS = 200;          // petite marge pour éviter de chipoter
-  unsigned long t0 = millis();
-  auto time_left = [&]() -> uint32_t {
-    unsigned long now = millis();
-    return (now - t0 >= budget_ms) ? 0 : (budget_ms - (now - t0));
-  };
+void get_external_parameter(){   //get parameters from notehub like timestep or nb_meas
+  //get the number of changes made on notehub
 
-  // Toujours rester sur le canal Notecard pendant l'IN
-  sensor.tcaselect(NOTECARD_I2C_MULTIPLEXER_CHANNEL);
-
-  // Valeurs "nouvelles" (=-1 => pas reçu)
-  int new_time_step = -1, new_nb_meas = -1, new_inbound = -1;
-
-  // 1) Demander le nombre de changements (rapide). On s’arrête si plus de temps.
-  if (time_left() < MIN_SLICE_MS) { sensor.tcaselect(0); return false; }
-  int nb_changes = 0;
-  {
-    J *req = notecard.newRequest("file.changes");
-    JAddStringToObject(req, "file", "data.qi");
-    J *rsp = notecard.requestAndResponse(req);
-    if (rsp) {
-      nb_changes = (int)JGetInt(rsp, "total");
-      if (nb_changes <= 0) {
-        J *info = JGetObjectItem(rsp, "info");
-        if (info) {
-          int t = (int)JGetInt(info, "total");
-          if (t > nb_changes) nb_changes = t;
-          J *dq = JGetObjectItem(info, "data.qi");
-          if (dq) {
-            t = (int)JGetInt(dq, "total");
-            if (t > nb_changes) nb_changes = t;
-          }
-        }
-      }
-      notecard.deleteResponse(rsp);
-    }
-  }
-
-  Serial.print("Nb Changes (data.qi): ");
+  int new_inbound_period = 0;
+  J *notecard_changes = notecard.requestAndResponse(notecard.newRequest("file.changes"));
+  J *changes_infos = JGetObjectItem(notecard_changes,"info");
+  J *data_changes = JGetObjectItem(changes_infos,"data.qi");
+  int nb_changes = (int) JGetInt(data_changes,"total");
+  notecard.deleteResponse(notecard_changes);
+  Serial.print("Nb Changes: ");
   Serial.println(nb_changes);
-  if (nb_changes <= 0) { sensor.tcaselect(0); return false; }
+  int new_time_step = 0;
+  int new_nb_meas_sent_at_once = 0;
 
-  // 2) Tirer quelques notes, **borné par le temps** ET un compteur.
-  int pulled = 0;
-  while (nb_changes > 0 && pulled < max_notes) {
-    if (time_left() < MIN_SLICE_MS) break;
+  if (nb_changes >0){ // only do something if there were changes on notehub
+    while (nb_changes>0){
+      //the parameters changed come in a FIFO queue, so oldest changes comes first in this loop and can later be overwritten by new changes if there were sevral changes of the same parameter
+      J *req = notecard.newRequest("note.get"); 
+      JAddStringToObject(req, "file", "data.qi"); 
+      JAddBoolToObject(req, "delete", true);
+      J *parameter_changed = notecard.requestAndResponse(req);
+      J *parameter_changed_body = JGetObjectItem(parameter_changed,"body");
 
-    J *req = notecard.newRequest("note.get");
-    JAddStringToObject(req, "file", "data.qi");
-    JAddBoolToObject(req, "delete", true);
-    J *rsp = notecard.requestAndResponse(req);
-    if (!rsp) break;
-
-    J *body = JGetObjectItem(rsp, "body");
-    if (body) {
-      // Tolérer variantes/typos
-      int ts = (int)JGetInt(body, "time_step");
-      if (ts <= 0) ts = (int)JGetInt(body, "time_setp");
-      if (ts <= 0) ts = (int)JGetInt(body, "timestep");
-      if (ts > 0) new_time_step = ts;
-
-      int nm = (int)JGetInt(body, "nb_meas");
-      if (nm > 0) new_nb_meas = nm;
-
-      int ip = (int)JGetInt(body, "inbound_period");
-      if (ip > 0) new_inbound = ip;
-    }
-    notecard.deleteResponse(rsp);
-    nb_changes--;
-    pulled++;
-  }
-
-  // 3) Appliquer si nécessaire (cette partie est locale, pas de radio)
-  bool changed = false;
-  if (new_time_step > 0 && new_time_step != time_step)        { time_step = new_time_step; changed = true; }
-  if (new_nb_meas   > 0 && new_nb_meas   != nb_meas_sent_at_once) { nb_meas_sent_at_once = new_nb_meas; changed = true; }
-  if (new_inbound   > 0 && new_inbound   != inbound_period)    { inbound_period = new_inbound; changed = true; }
-
-  if (changed) {
-    Serial.println("👉 Mise à jour paramètres (borné)");
-    Serial.print(" - time_step = "); Serial.println(time_step);
-    Serial.print(" - nb_meas_sent_at_once = "); Serial.println(nb_meas_sent_at_once);
-    Serial.print(" - inbound_period = "); Serial.println(inbound_period);
-
-    // Réécriture conf.txt (rapide, mais on vérifie encore le budget)
-    if (time_left() >= MIN_SLICE_MS) {
-      SD.remove(CONFIG_FILENAME);
-      File configFile = SD.open(CONFIG_FILENAME, FILE_APPEND);
-      if (configFile) {
-        configFile.print(String(time_step) + "; //time step in seconds \n");
-        configFile.print(String(SetRTC) + "; //set RTC with GSM time (1 or 0) \n");
-        configFile.print(String(nb_meas_sent_at_once) + "; //number of measurements to be sent at once via gsm \n");
-        configFile.print(String(inbound_period) + "; //inbound sync period (do hub.sync inbound every N send cycles)\n");
-        configFile.close();
+      //adjust the correct parameter depending on its name
+      int temp_time_step = (int) JGetInt(parameter_changed_body,"time_step"); 
+      if(temp_time_step != 0){
+        new_time_step = temp_time_step;
       }
+      int temp_nb_meas_sent_at_once = (int) JGetInt(parameter_changed_body,"nb_meas");
+      if(temp_nb_meas_sent_at_once != 0){
+        new_nb_meas_sent_at_once = temp_nb_meas_sent_at_once;
+      }
+      int temp_inbound_period = (int) JGetInt(parameter_changed_body,"inbound_period");
+      if (temp_inbound_period > 0) {
+      new_inbound_period = temp_inbound_period;
+      }
+      notecard.deleteResponse(parameter_changed);
+      nb_changes-=1;
     }
+    if (new_time_step != 0 || new_nb_meas_sent_at_once != 0 || new_inbound_period != 0) { //only do changes if one of the parameters changed on notehub had the correct name
+      if(new_time_step==0) new_time_step = time_step; //no change in time step
+      if(new_nb_meas_sent_at_once==0) new_nb_meas_sent_at_once = nb_meas_sent_at_once; //no change in nb_meas_sent_at_once
+      if(new_inbound_period == 0) new_inbound_period = inbound_period;
+      Serial.print("new time step: ");
+      Serial.println(new_time_step);
+      Serial.print("new number of measurements to send at once: ");
+      Serial.println(new_nb_meas_sent_at_once);
+      Serial.print("new inbound period: ");
+      Serial.println(new_inbound_period);
 
-    // Recaler la base de temps (local)
-    if (time_left() >= MIN_SLICE_MS) {
-      DateTime starting_time_dt(
-        start_date_time[0], start_date_time[1], start_date_time[2],
-        start_date_time[3], start_date_time[4], start_date_time[5]
-      );
-      DateTime new_start_time = starting_time_dt + bootCount_since_change * (long)time_step;
-      start_time        = (int)new_start_time.unixtime();
-      start_date_time[0]= new_start_time.year();
-      start_date_time[1]= new_start_time.month();
-      start_date_time[2]= new_start_time.day();
-      start_date_time[3]= new_start_time.hour();
-      start_date_time[4]= new_start_time.minute();
-      start_date_time[5]= new_start_time.second();
-      bootCount_since_change = 0;
+      //write changes to sd card conf.txt file
+      Serial.println("change conf file");
+      String new_conf_file_str = String(new_time_step)+"; //time step in seconds \n";
+      new_conf_file_str = new_conf_file_str + String(SetRTC) +"; //set RTC with GSM time (1 or 0) \n";
+      new_conf_file_str = new_conf_file_str + String(new_nb_meas_sent_at_once) +"; //number of measurements to be sent at once via gsm \n";
+      new_conf_file_str += String(new_inbound_period) +"; //inbound sync period (do hub.sync inbound every N send cycles)\n";
+      SD.remove(CONFIG_FILENAME); //delete conf file
+      File configFile = SD.open(CONFIG_FILENAME, FILE_APPEND); //create a new conf file with new parameters
+      configFile.print(new_conf_file_str);
+      configFile.close();
+
+      if(bootCount!=0){
+        //since we might have changed the time step, the computation of the wake up time: wkae_up_time = start_time + bootcount_since_change * time_step no longer holds
+        //the solution is to redefine the start time with the next wakeup time and to set the bootcount since change to 0
+        DateTime starting_time_dt = DateTime(start_date_time[0],start_date_time[1],start_date_time[2],start_date_time[3],start_date_time[4],start_date_time[5]);
+        DateTime new_start_time = starting_time_dt +bootCount_since_change*time_step;
+        start_time = new_start_time.unixtime();
+        start_date_time[0]=new_start_time.year();
+        start_date_time[1]=new_start_time.month();
+        start_date_time[2]=new_start_time.day();
+        start_date_time[3]=new_start_time.hour();
+        start_date_time[4]=new_start_time.minute();
+        start_date_time[5]=new_start_time.second();
+        bootCount_since_change = 0;
+      }
+      time_step=new_time_step;
+      nb_meas_sent_at_once=new_nb_meas_sent_at_once;
+      inbound_period = new_inbound_period;
     }
   }
-
-  // 4) Toujours relâcher le bus TCA (et ne pas toucher au MOSFET ici)
-  sensor.tcaselect(0);
-  return changed;
 }
 
 void set_RTC_with_GSM_time(){ //gets the time from GSM and adjust the rtc clock with the swiss winter time (UTC+1)
@@ -765,7 +803,7 @@ unsigned int getGSMtime(){
   tp.DotStar_SetPixelColor(25, 0, 25 ); //LED Purple
 
   if(sync_in()){
-    //get_external_parameter(); //get changes from notehub
+    get_external_parameter(); //get changes from notehub
     J *rsp = notecard.requestAndResponse(notecard.newRequest("card.time"));
     unsigned int recieved_time = (unsigned int)JGetNumber(rsp, "time");
     notecard.deleteResponse(rsp);
@@ -782,36 +820,29 @@ unsigned int getGSMtime(){
     u8x8.print(bars);
     tp.DotStar_SetPixelColor(0, 50, 0 ); //LED Green
     Serial.println("The RTC time is adjusted with the GSM time (GMT + 1)");
-    digitalWrite(MOSFET_NOTECARD_PIN, LOW); //turn off the notecard
+    //digitalWrite(MOSFET_NOTECARD_PIN, LOW); //turn off the notecard
     sensor.tcaselect(0); //connect the multiplexer to another I2c line to avoid having the notecard interfer with other devices
+    releaseNotecardBus();
     return recieved_time+3600; //+3600 for GMT+1 (winter time in switzerland)
+
   }
   else{
     Serial.println("could not connect the Notecard, we use RTC time instead");
     u8x8.setCursor(0, 6);
     u8x8.print("Failed to connect");
     tp.DotStar_SetPixelColor(50, 0, 0 ); //LED Red
-    digitalWrite(MOSFET_NOTECARD_PIN, LOW); //turn off the notecard
+    //digitalWrite(MOSFET_NOTECARD_PIN, LOW); //turn off the notecard
     sensor.tcaselect(0); //connect the multiplexer to another I2c line to avoid having the notecard interfer with other devices
+    releaseNotecardBus();
     return (unsigned int)rtc.now().unixtime(); //if notecard couldn't connect just return the current time of the rtc.
   }
 }
 
 void send_data_overGSM() {
-  // ====== Paramètres généraux ======
+  // ---- Paramètres d’envoi ----
   const int MAX_BATCH   = 300;
-  int       CHUNK_LINES = 30;      // on peut ajuster si OOM à l’attache du body
-  const unsigned long MAX_MS = 200000UL;   // 200 s: time-box global
+  int CHUNK_LINES       = 30;    // démarre petit pour valider; remonte ensuite (10, 20, …)
 
-  unsigned long t0 = millis();
-  auto remaining_s = [&]() -> unsigned long {
-    unsigned long now = millis();
-    if (now - t0 >= MAX_MS) return 0UL;
-    return (MAX_MS - (now - t0)) / 1000UL;
-  };
-  auto timed_out = [&]() -> bool { return (millis() - t0) >= MAX_MS; };
-
-  // ====== Sélection des lignes à envoyer ======
   int want = nb_meas_sent_at_once + (failed_sync_count * nb_meas_sent_at_once);
   int target_lines = min(want, MAX_BATCH);
   if (target_lines <= 0) { Serial.println("Rien à envoyer."); return; }
@@ -819,19 +850,16 @@ void send_data_overGSM() {
   File myFile = SD.open(DATA_FILENAME, FILE_READ);
   if (!myFile) { Serial.println("❌ SD open error"); return; }
 
+  // ---- Repositionnement sur les N dernières lignes ----
   long size = myFile.size();
   if (size <= 0) { myFile.close(); Serial.println("Fichier vide."); return; }
-
   myFile.seek(max(0L, size - 1));
   bool ends_with_nl = (myFile.read() == '\n');
 
   int needed_newlines = target_lines + (ends_with_nl ? 1 : 0);
   long pos = size - 1; int found = 0;
-  while (pos >= 0 && found < needed_newlines) {
-    myFile.seek(pos);
-    if (myFile.read() == '\n') found++;
-    pos--;
-  }
+  while (pos >= 0 && found < needed_newlines) { myFile.seek(pos); if (myFile.read() == '\n') found++; pos--; }
+
   long startOff = (pos < 0) ? 0 : (pos + 1);
   myFile.seek(startOff);
   int c = myFile.peek();
@@ -842,48 +870,25 @@ void send_data_overGSM() {
   if (effective_lines < target_lines) target_lines = effective_lines;
   if (target_lines <= 0) { myFile.close(); Serial.println("Pas assez de lignes."); return; }
 
-  // ====== Préparation capteurs/nom des champs ======
+  // ---- Préparation ----
   int ns = sensor.get_nb_values();
   if (ns <= 0) { myFile.close(); Serial.println("Aucun capteur (ns==0)."); return; }
   const char* const* sensor_names = sensor.get_names();
 
   Serial.printf("📤 Objectif: %d mesures (capées à %d, chunk=%d)\n", want, target_lines, CHUNK_LINES);
 
-  // ====== Initialisation Notecard (time-box + double essai) ======
-  bool nc_on = false;
-  auto nc_power_cycle = [&]() {
-    digitalWrite(MOSFET_NOTECARD_PIN, LOW);
-    delay(300);
-    digitalWrite(MOSFET_NOTECARD_PIN, HIGH);
-    delay(800);
-  };
-
-  if (timed_out()) { myFile.close(); Serial.println("⏱️ Timeout avant init NC"); return; }
-
+  // Allumer la notecard maintenant (comme ta version stable)
   if (!initialize_notecard_safe()) {
-    Serial.println("⚠️ Init NC: essai #1 KO → power-cycle & retry");
-    nc_power_cycle();
-    if (!initialize_notecard_safe()) {
-      Serial.println("❌ Notecard init KO (après 2 essais)");
-      myFile.close();
-      // LED rouge pour bien repérer
-      tp.DotStar_SetPixelColor(50, 0, 0);
-      return;
-    }
-  }
-  nc_on = true;
-  // LED jaune (perçu) pendant l’opération
-  tp.DotStar_SetPixelColor(50, 50, 0);
-  delay(100);
-  Serial.println("✅ Notecard init OK");
+  Serial.println("❌ Notecard init KO");
+  myFile.close();
+  return;
+}
 
-  // ====== Construction/enqueue des chunks ======
+  tp.DotStar_SetPixelColor(25, 25, 0);
+
   int sent_valid = 0;
-  bool aborted_for_time = false;
 
   while (myFile.available() && sent_valid < target_lines) {
-    if (timed_out()) { aborted_for_time = true; break; }
-
     int chunk_target = min(CHUNK_LINES, target_lines - sent_valid);
 
     // JSON du chunk
@@ -900,15 +905,13 @@ void send_data_overGSM() {
     }
     for (int i = 0; i < ns; i++) {
       arr[i] = JAddArrayToObject(data, sensor_names[i]);
-      if (!arr[i]) Serial.println("❌ OOM array capteur");
+      if (!arr[i]) { Serial.println("❌ OOM array capteur"); }
     }
 
     int chunk_valid = 0;
     int safety_reads = 0;
 
     while (myFile.available() && chunk_valid < chunk_target && safety_reads < (chunk_target * 4)) {
-      if (timed_out()) { aborted_for_time = true; break; }
-
       safety_reads++;
       String line = myFile.readStringUntil('\n');
       if (line.length() == 0) continue;
@@ -921,8 +924,8 @@ void send_data_overGSM() {
       };
 
       String fld;
-      nextField(fld);  // id
-      nextField(fld);  // datetime
+      nextField(fld);            // id (ignoré)
+      nextField(fld);            // datetime
       if (fld.indexOf('/') == -1 || fld.indexOf(':') == -1 || fld.length() < 19) continue;
 
       DateTime dt(
@@ -933,33 +936,28 @@ void send_data_overGSM() {
         fld.substring(14,16).toInt(),
         fld.substring(17,19).toInt()
       );
-      unsigned long epoch = (unsigned long) dt.unixtime() - 3600; // CET/UTC+1 hiver
+      unsigned long epoch = (unsigned long) dt.unixtime() - 3600;
 
-      bool ok_line = true;
+      bool ok = true;
       for (int si = 0; si < ns; si++) {
         String vs; nextField(vs);
-        if (vs.length() == 0) { ok_line = false; break; }
+        if (vs.length() == 0) { ok = false; break; }
         if (vs.length() && vs[vs.length()-1] == '\r') vs.remove(vs.length()-1);
 
         J *sample = JCreateObject();
-        if (!sample) { ok_line = false; break; }
-        JAddStringToObject(sample, "value", vs.c_str());
+        if (!sample) { ok = false; break; }
+        JAddStringToObject(sample, "value", vs.c_str());   // garder la précision CSV
         JAddNumberToObject(sample, "epoch", (double)epoch);
         JAddItemToArray(arr[si], sample);
       }
-      if (!ok_line) continue;
+      if (!ok) continue;
 
       Serial.printf("🕒 %lu  (chunk #%d)\n", epoch, (sent_valid / CHUNK_LINES) + 1);
       chunk_valid++;
       sent_valid++;
     }
 
-    if (aborted_for_time) {
-      free(arr);
-      JDelete(body);
-      break;
-    }
-
+    // SI aucun échantillon valide → on libère et on stoppe
     if (chunk_valid == 0) {
       free(arr);
       JDelete(body);
@@ -967,81 +965,74 @@ void send_data_overGSM() {
       break;
     }
 
-    // Attache body → note.add
+    // Réduire la charge pendant le TX radio
+    u8x8.setPowerSave(1);        // OLED OFF (baisse ~15-20 mA)
+    tp.DotStar_SetPower(false);  // LED OFF
+    digitalWrite(MOSFET_SENSORS_PIN, LOW); // coupe capteurs + SD (on a fini de lire la SD)
+    delay(20);                   // laisse la rail se tasser avant la radio
+// … après chunk_valid++ / sent_valid++ et AVANT note.add
+// (optionnel : seulement pour le 1er chunk pour éviter d’inonder la console)
+static const bool LOG_BODY = false;
+if (LOG_BODY) {
+  print_json_body_chunk(body, sensor_names, ns);
+}
+    // note.add avec **body** (aucun JPrint, pas de payload)
     J *req = notecard.newRequest("note.add");
     JAddStringToObject(req, "file", "data.qo");
-    JAddItemToObject(req, "body", body);   // transfert propriété
+    JAddItemToObject(req, "body", body);     // transfert de propriété
 
+    // Vérifier que l’attache a réussi (important !)
     if (!JGetObjectItem(req, "body")) {
-      Serial.println("⚠️ OOM à l’attache du body → chunk plus petit ensuite");
+      Serial.println("⚠️ OOM à l’attache du body → on réessaiera avec un chunk plus petit");
+      // on détruit ce qu’on a créé localement
       JDelete(body);
       free(arr);
+      // Réduis le chunk pour la suite
       CHUNK_LINES = max(1, CHUNK_LINES / 2);
       break;
     }
 
     JAddBoolToObject(req, "sync", false);
-    notecard.sendRequest(req);     // enqueue sans attendre
+
+    // Envoi (sans ACK pour limiter la mémoire, comme dans ta version qui marchait)
+    notecard.sendRequest(req);
 
     free(arr);
-    // ne pas JDelete(body) ici (attaché à req)
+    // NE PAS JDelete(body) ici : il est attaché à la requête
   }
 
   myFile.close();
-  delay(100);
-  //log_radio_status_once();
-  delay(100);
-  // ====== Session hub.sync unique (OUT + éventuellement IN) ======
-  int ip = inbound_period; if (ip < 1) ip = 4;
-  bool want_in = ((send_success_count + 1) % ip) == 0;
 
-  bool ok = false;
-  if (!aborted_for_time && !timed_out()) {
-    unsigned long remain = remaining_s();
-    if (remain < 10UL) remain = 10UL;            // mini 10 s
-    Serial.print("🔄 Sync (OUT"); if (want_in) Serial.print("+IN"); Serial.println(")...");
-    delay(100);
-    tp.DotStar_SetPixelColor(238, 130, 238); //violet
-    delay(100);
-    ok = sync_once(want_in, remain);
-    delay(100);
-  } else {
-    Serial.println("⏱️ Pas de sync: temps imparti écoulé");
-  }
+
+// → une seule session OUT (+ IN périodique)
+int ip = inbound_period; if (ip < 1) ip = 4;
+bool want_in = ((send_success_count + 1) % ip) == 0;
+Serial.print("🔄 Sync (OUT"); if (want_in) Serial.print("+IN"); Serial.println(")...");
+bool ok = sync_once(want_in, 300);
+delay(150);
+
 
   long queued = 0;
   if (ok) {
     J *st = notecard.requestAndResponse(notecard.newRequest("hub.sync.status"));
-    if (st) {
-      queued = (long) JGetInt(st, "queued");
-      notecard.deleteResponse(st);
-    }
+    queued = (long) JGetInt(st, "queued");
+    notecard.deleteResponse(st);
   }
 
   if (!ok || queued > 0) {
     Serial.printf("⚠️ Sync partielle: ok=%d queued=%ld\n", (int)ok, queued);
-    tp.DotStar_SetPixelColor(0, 0, 50);       // orange
+    tp.DotStar_SetPixelColor(50, 25, 0);
     failed_sync_count = min(failed_sync_count + 1, 3);
   } else {
     Serial.println("✅ Données envoyées !");
-    tp.DotStar_SetPixelColor(0, 50, 0);        // vert
-    delay(100);
+    tp.DotStar_SetPixelColor(0, 50, 0);
     failed_sync_count = 0;
     send_success_count++;
-    delay(100);
-    if (want_in && !timed_out()) {
-      (void) get_external_parameter(50000,6);                // courte, mais si ça traîne, on coupera quand même après
-    }
+    if (want_in) get_external_parameter();
   }
 
-  // ====== Toujours éteindre la Notecard ======
-  if (nc_on) {
-    powerOffNotecard();                        // MOSFET_NOTECARD_PIN LOW + tcaselect(0)
-  }
-  delay(80);
+  releaseNotecardBus();
+
+  delay(250);
 }
-
-
-
-
 

@@ -30,6 +30,7 @@ bool Config = false;
 bool Filltubes = false;
 const int EEPROM_SIZE = 4;  // Enough for a float (4 bytes)
 const int EEPROM_INJECTION_START = 4; // Start address for injection data in EEPROM. 
+int lastInjectedVolume = 0;  // ou int, selon ton type de dose
 
 // Function to read a response from the pump with a timeout
 String Pump::readPumpResponse() {
@@ -71,16 +72,16 @@ void Pump::pumpSleep() {
     if (!response.isEmpty()) {
       if (response.indexOf("*SL") != -1) {
         Serial.println("Pump response (sl): " + response);
-        Serial.println("Pump is now in sleep mode.");
+        Serial.println(F("Pump is now in sleep mode."));
         return;
       } else if (response.indexOf("*ER") != -1){
-        Serial.println("Pump couldn't fall asleep");
+        Serial.println(F("Pump couldn't fall asleep"));
         handleError(response);
         return;
       }
     }
     if (millis() - startTime > timeout) {
-      Serial.println("Pump couldn't fall asleep due to lack of communication");
+      Serial.println(F("Pump couldn't fall asleep due to lack of communication"));
       return;
     }
   }
@@ -89,14 +90,14 @@ void Pump::pumpSleep() {
 // Error handling function
 bool Pump::handleError(String& response) {
   if (response == "*ER") {
-    Serial.println("The pump encountered a problem");
+    Serial.println(F("The pump encountered a problem"));
     Serial2.print("X\r");  // Cancel/reset operation
     latestErrorMessage = response;
     return true;
   } else if (response == "Timeout") {
-    Serial.print("The pump doesn't answer\n");
+    Serial.print(F("The pump doesn't answer\n"));
     latestErrorMessage = response;
-    Serial.print("latesterrormessage : ");
+    Serial.print(F("latesterrormessage : "));
     Serial.println(latestErrorMessage);
     return true;
   } else {
@@ -130,6 +131,8 @@ void Pump::sendCommand(const String& pumpcommand) {
       if (response.indexOf("DONE") != -1) {
         // Successful injection
         latestErrorMessage = "Injected";
+        Serial.println(latestErrorMessage);  // Print response
+        
         pumpActivationCount++;
         break;
       } else if (response.indexOf("*WA") != -1) {
@@ -309,7 +312,7 @@ void Pump::configure(int &time_step, U8X8 &u8x8) {
       u8x8.clear();
       u8x8.setCursor(0, 1);
       u8x8.println("Filling tubes..");
-      sendCommand("D,150");
+      sendCommand("D,50");
     }
     
 
@@ -331,7 +334,7 @@ void Pump::handleInjections2(int &bootCount, int &time_step) {
     data.heights[i] = data.heights[i + 1];
   }
   data.heights[4] = measuredWaterheight - water_height_offset;
-  Serial.print("data.heights[4] and water height offset : ");
+  Serial.print(F("data.heights[4] and water height offset : "));
   Serial.print(data.heights[4]);
   Serial.print(", ");
   Serial.println(water_height_offset); 
@@ -348,8 +351,10 @@ void Pump::handleInjections2(int &bootCount, int &time_step) {
       if (heightsMean >= doseTable[i].lower && heightsMean < doseTable[i].upper && doseTable[i].numberOfInjections > 0) {
         String pumpCommand = "D," + String(doseTable[i].dose);
         Serial.println(i);
-        Serial.println(doseTable[i].dose);
+        //Serial.println(doseTable[i].dose);
+        //String dose=String(doseTable[i].dose);
         sendCommand(pumpCommand);  // Inject
+        lastInjectedVolume = doseTable[i].dose; // mémorise le volume injecté
         Inject = false;            // Disable further injections until cooldown
         Serial.println(pumpCommand);
         doseTable[i].numberOfInjections--;
@@ -363,7 +368,7 @@ void Pump::handleInjections2(int &bootCount, int &time_step) {
   } else {
     // Wait until cooldown is complete before injecting again
     counter++;
-    if (counter >= (int)(10800 / time_step + 0.5)) {  // 3 hours
+    if (counter >= (int)(10800 / time_step + 0.5)) {  // Waiting time in seconds 10800 = 3 hours
       Inject = true;
       counter = 0;
     }
@@ -374,8 +379,8 @@ void Pump::handleInjections2(int &bootCount, int &time_step) {
 
   // Reset error message for next cycle
   Serial.print(latestErrorMessage);
-  latestErrorMessage = "*OFF";
-  Serial.print(latestErrorMessage);
+  //latestErrorMessage = "*OFF";
+  //Serial.print(latestErrorMessage);
   delay(1000);
   return;
 }
@@ -397,11 +402,11 @@ int Pump::countLines(File &file) {
 // Return pump-related CSV fields to be appended to main CSV line.
 String Pump::getCSVFields() {
   // Format: pump_latestError;pumpActivationCount
-  String s = latestErrorMessage + ";" + String(pumpActivationCount);
+  String s = latestErrorMessage + ";" + String(pumpActivationCount)+";"+ String(water_height_offset)+";"+ String(lastInjectedVolume);
   return s;
 }
 
 String Pump::getCSVHeader() {
   // Header fields corresponding to getCSVFields: LatestError;ActivationCount
-  return "PumpError;PumpActivations";
+  return "PumpError;PumpActivations;Wateroffset;Volume[ml]";
 }
