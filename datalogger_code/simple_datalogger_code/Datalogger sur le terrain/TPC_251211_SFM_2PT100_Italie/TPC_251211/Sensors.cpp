@@ -101,14 +101,14 @@ TinyPICO tiny = TinyPICO();
 SHT31 sht;
 BMP581 bmp;
 SensirionI2cSfmSf06 sfmSf06;
-SCD4x co2_sensor(SCD4x_SENSOR_SCD41);
-//SCD4x co2_2_sensor(SCD4x_SENSOR_SCD41);
+SFE_ADS122C04 Pt100_1; // Pt100 sensor
+SFE_ADS122C04 Pt100_2; // Pt100 sensor
 
 // Noms / valeurs / décimales (identiques à ta base)
-String names[] = {"Vbatt","tempSHT","humSHT","tempBMP","pressBMP","CO2_1","debitSFM","velSFM","tempSFM"};
+String names[] = {"Vbatt","tempSHT","humSHT","tempBMP","pressBMP","debitSFM","velSFM","tempSFM","tempPt1","tempPt2"};
 const int nb_values = sizeof(names) / sizeof(names[0]);
 float values[nb_values];
-int   decimals[] = {2, 3, 1, 2, 2, 2, 6, 6, 3};
+int   decimals[] = {2, 3, 1, 2, 2, 6, 6, 3, 3, 3};
 
 // ================= Helpers internes (privés au fichier) =================
 
