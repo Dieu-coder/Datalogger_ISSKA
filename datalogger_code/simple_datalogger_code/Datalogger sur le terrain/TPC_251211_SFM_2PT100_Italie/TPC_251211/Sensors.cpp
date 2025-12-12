@@ -13,6 +13,7 @@
 #include "SHT31.h"
 #include "SparkFun_BMP581_Arduino_Library.h"
 #include <TinyPICO.h>
+#include <SparkFun_ADS122C04_ADC_Arduino_Library.h>
 #include <SensirionI2cSfmSf06.h>
 #include "SparkFun_SCD4x_Arduino_Library.h"
 
@@ -108,7 +109,7 @@ SFE_ADS122C04 Pt100_2; // Pt100 sensor
 String names[] = {"Vbatt","tempSHT","humSHT","tempBMP","pressBMP","debitSFM","velSFM","tempSFM","tempPt1","tempPt2"};
 const int nb_values = sizeof(names) / sizeof(names[0]);
 float values[nb_values];
-int   decimals[] = {2, 3, 1, 2, 2, 6, 6, 3, 3, 3};
+int   decimals[] = {2, 3, 1, 2, 2, 6, 6, 2, 2, 2};
 
 // ================= Helpers internes (privés au fichier) =================
 
@@ -150,7 +151,7 @@ static void tca_disable() {
 static void init_sfm_block_with_retry() {
     g_sfm_ok = false;
 
-    if (!tca_select_ok(5)) {
+    if (!tca_select_ok(7)) {
         tca_disable();
         return;
     }
@@ -241,20 +242,27 @@ static void sensors_init_once() {
   }
   tca_disable();
 
-// 4) Init SCD41 #1 (canal 7) — tolérant aux absences/temporisations
-g_scd41_ready = false;
-if (tca_select_ok(7)) {
-  delay(200);
-  if (i2c_present(0x62)) {
-    co2_sensor.begin();          // si begin() ne jette pas d’erreur, on suppose OK
-    g_scd41_ready = true;
-  }
-}
-tca_disable();
+  // 4) Init SFM3003 (canal 5)
+  init_sfm_block_with_retry();
 
-// 6) Init SFM3003 (canal 5)
-init_sfm_block_with_retry();
+  // 5) Init Pt100_1 (canal 5)
+  if(tca_select_ok(5)){
+    delay(200);
+    Pt100_1.begin();
+    Pt100_1.configureADCmode(ADS122C04_4WIRE_MODE);
+  }
+  tca_disable();
+
+  // 6) Init Pt100_2 (canal 6)
+  if(tca_select_ok(6)){
+    delay(200);
+    Pt100_2.begin();
+    Pt100_2.configureADCmode(ADS122C04_4WIRE_MODE);
+  }
+  tca_disable();
 }
+
+
 
 // ========================= API publique (identique) =========================
 
@@ -328,60 +336,47 @@ void Sensors::measure() {
   }
   tca_disable();
 
-// 3) CO2 SCD41 #1 (canal 7) — single-shot en 1 cycle, non bloquant si absent
-values[5] = NAN;  // par défaut
+  // 3) SFM3003 (canal 7) — lecture en mode continu
+  values[5] = NAN;
+  values[6] = NAN;
+  values[7] = NAN;
 
-if (tca_select_ok(7)) {
-  delay(200);  // stabilité TCA
+  if (g_sfm_ok && tca_select_ok(7)) {
+    delay(100);
+    int16_t flowRaw = 0, temperatureRaw = 0;
+    uint16_t status = 0;
 
-  // Vérifie la présence à CHAQUE cycle; si au boot ça ne répond pas, on ne touche pas la lib
-  bool present = i2c_present(0x62);
-
-  // Si le capteur est apparu après l’init, on tente un begin() une seule fois
-  if (present && !g_scd41_ready) {
-    co2_sensor.begin();
-    g_scd41_ready = true;  // s’il y a un souci bus, on restera dans le else ci-dessous
+    int16_t err = sfmSf06.readMeasurementDataRaw(flowRaw, temperatureRaw, status);
+    if (err == 0) {
+      values[5] = (float(flowRaw) + 12288.0f) / 120.0f;
+      values[6] = pchipVelocityFromSlm(values[5]);
+      values[7] = float(temperatureRaw) / 200.0f;
+    } else {
+      Serial.println("[Sensors] WARN: lecture SFM3003 échouée");
+    }
   }
+  tca_disable();
 
-  if (present && g_scd41_ready) {
-    // 1) lancer la mesure
-    (void)co2_sensor.measureSingleShot();
+  // 4) Pt100_1 (canal 5)
+  values[8] = NAN;
 
-    // 2) attendre ~6.5 s (SCD41: 5–6 s) puis 3) lire
-    delay(6500);
-
-    if (co2_sensor.readMeasurement()) {
-      float co2ppm = co2_sensor.getCO2();
-      if (!isnan(co2ppm) && co2ppm >= 250 && co2ppm <= 60000) {
-        values[5] = co2ppm;
-      } // sinon on laisse NAN
-    } // sinon on laisse NAN
+  if(tca_select_ok(5)){
+    delay(200);
+    values[8] = Pt100_1.readPT100Centigrade();
+    Pt100_1.powerdown();
   }
-}
-tca_disable();
-delay(50);
+  tca_disable();
 
-// 5) SFM3003 (canal 5) — lecture en mode continu
-values[6] = NAN;
-values[7] = NAN;
-values[8] = NAN;
+  // 5) Pt100_2 (canal 6)
+  values[9] = NAN;
 
-if (g_sfm_ok && tca_select_ok(5)) {
-  delay(100);
-  int16_t flowRaw = 0, temperatureRaw = 0;
-  uint16_t status = 0;
-
-  int16_t err = sfmSf06.readMeasurementDataRaw(flowRaw, temperatureRaw, status);
-  if (err == 0) {
-    values[6] = (float(flowRaw) + 12288.0f) / 120.0f;
-    values[7] = pchipVelocityFromSlm(values[6]);
-    values[8] = float(temperatureRaw) / 200.0f;
-  } else {
-    Serial.println("[Sensors] WARN: lecture SFM3003 échouée");
+  if(tca_select_ok(6)){
+    delay(200);
+    values[9] = Pt100_2.readPT100Centigrade();
+    Pt100_2.powerdown();
   }
-}
-tca_disable();
-
+  tca_disable();
+    
   // (Comportement d’origine) — on termine en sélectionnant le canal 2.
   tcaselect(2);
   delay(50);
